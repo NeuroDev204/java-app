@@ -3642,6 +3642,40 @@ func (ctx *VMContext) handleNativeCall(clsName, mName, mDesc string, frame *Fram
 			}
 			frame.OperandStack.PushInt(10)
 			return
+		} else if mName == "getRGB" {
+			// getRGB(int[] rgbData, int offset, int scanlength, int x, int y, int width, int height)
+			h := frame.OperandStack.PopInt()
+			w := frame.OperandStack.PopInt()
+			y := frame.OperandStack.PopInt()
+			x := frame.OperandStack.PopInt()
+			scanlength := frame.OperandStack.PopInt()
+			offset := frame.OperandStack.PopInt()
+			rgbRef := frame.OperandStack.PopRef()
+			imgRef := frame.OperandStack.PopRef()
+			var dst []int32
+			if obj, ok := rgbRef.(*Object); ok && obj != nil {
+				if arr, ok := obj.Extra.([]int32); ok {
+					dst = arr
+				}
+			} else if arr, ok := rgbRef.([]int32); ok {
+				dst = arr
+			}
+			img := extractImage(imgRef)
+			if img != nil && dst != nil {
+				b := img.Bounds()
+				for row := int32(0); row < h; row++ {
+					for col := int32(0); col < w; col++ {
+						di := offset + row*scanlength + col
+						if di < 0 || int(di) >= len(dst) {
+							continue
+						}
+						// straight (non-premultiplied) ARGB 0xAARRGGBB, matching createRGBImage/drawRGB
+						nc := color.NRGBAModel.Convert(img.At(b.Min.X+int(x+col), b.Min.Y+int(y+row))).(color.NRGBA)
+						dst[di] = int32(uint32(nc.A)<<24 | uint32(nc.R)<<16 | uint32(nc.G)<<8 | uint32(nc.B))
+					}
+				}
+			}
+			return
 		}
 	} else if clsName == "java/lang/System" {
 		if mName == "currentTimeMillis" {
