@@ -1,0 +1,20 @@
+{
+  "server": {
+    "host": "hs1.teamobi.com",
+    "port": 19129
+  },
+  "account": {
+    "username": "vjncible@gmail.com",
+    "password": "660007",
+    "character": ""
+  },
+  "upgrade": {
+    "target_level": 10,
+    "clover_3_min": 4,
+    "clover_3_max": 7,
+    "clover_4_min": 8,
+    "clover_4_max": 15,
+    "stop_if_out_of_clover": true,
+    "delay_ms": 500
+  }
+}

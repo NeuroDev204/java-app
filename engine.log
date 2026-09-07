@@ -1,0 +1,1 @@
+Picked up JAVA_TOOL_OPTIONS: -XX:+UseZGC -XX:+ZGenerational -XX:MaxRAMPercentage=50.0 -XX:+UseCompressedOops -XX:+UseCompressedClassPointers -XX:+OptimizeStringConcat -XX:+UseStringDeduplication -XX:MetaspaceSize=256m -XX:MaxMetaspaceSize=512m -XX:ReservedCodeCacheSize=256m -XX:+TieredCompilation -XX:+AlwaysPreTouch -Djava.security.egd=file:/dev/./urandom -Dfile.encoding=UTF-8
