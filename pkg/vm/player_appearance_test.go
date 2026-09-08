@@ -45,8 +45,8 @@ func TestSyncPlayerAppearance(t *testing.T) {
 	bmChar.SetField("bZ", Slot{Num: 15})  // red dress
 	bmChar.SetField("ca", Slot{Num: 10})  // legs
 	bmChar.SetField("bX", Slot{Num: 12})  // witch hat
-	bmChar.SetField("cd", Slot{Num: 21})  // cyan fairy wings (b21_wing)
-	bmChar.SetField("dY", Slot{Num: 18})  // phapsu wand
+	bmChar.SetField("cd", Slot{Num: 21})  // select-screen wing id, not a b*_wing sprite
+	bmChar.SetField("dY", Slot{Num: 18})  // select-screen weapon id, out of phapsu 0..17
 	bmChar.SetField("cc", Slot{Num: 4})   // blonde hair
 	bmChar.SetField("by", Slot{Num: 2})   // phapsu class
 	bmChar.SetField("bz", Slot{Num: 101}) // level 101
@@ -65,11 +65,13 @@ func TestSyncPlayerAppearance(t *testing.T) {
 	if got := cnG.GetField("bX").Num; got != 12 {
 		t.Errorf("expected bX (hat) = 12, got %d", got)
 	}
-	if got := cnG.GetField("cd").Num; got != 21 {
-		t.Errorf("expected cd (wings) = 21, got %d", got)
+	// Wings and weapon must NOT be carried over from character select: those ids
+	// address files the JAR does not have, so the layers would draw nothing.
+	if got := cnG.GetField("cd").Num; got != 0 {
+		t.Errorf("expected cd (wings) left alone = 0, got %d", got)
 	}
-	if got := cnG.GetField("dY").Num; got != 18 {
-		t.Errorf("expected dY (weapon) = 18, got %d", got)
+	if got := cnG.GetField("dY").Num; got != 0 {
+		t.Errorf("expected dY (weapon) left alone = 0, got %d", got)
 	}
 	if got := cnG.GetField("cc").Num; got != 4 {
 		t.Errorf("expected cc (hair) = 4, got %d", got)
@@ -135,8 +137,8 @@ func TestSyncPlayerAppearanceUsesSelectionIndexForFreshPlayer(t *testing.T) {
 	if got := cnG.GetField("ca").Num; got != 10 {
 		t.Errorf("expected selected legs ca=10, got %d", got)
 	}
-	if got := cnG.GetField("cd").Num; got != 21 {
-		t.Errorf("expected selected wings cd=21, got %d", got)
+	if got := cnG.GetField("cd").Num; got != -1 {
+		t.Errorf("expected wings cd left alone at -1, got %d", got)
 	}
 	if got := cnG.GetField("bY").Num; got != 7 {
 		t.Errorf("expected selected head bY=7, got %d", got)

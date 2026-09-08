@@ -34,6 +34,7 @@ import (
 	"java-app/pkg/upgradebot"
 	"java-app/pkg/vm"
 	"log"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -117,6 +118,19 @@ type Bridge struct {
 	frameBuffer      []byte
 	lastRevision     uint64
 	lastSentRevision uint64
+}
+
+// SetDataDir gives the engine a writable directory in which to keep the MIDP
+// record store across launches. Call it before LoadJAR. Without it record
+// stores live in memory only, so everything the game downloads while playing —
+// item icons in particular — is discarded on exit and must be fetched again,
+// leaving inventory slots on the game's loading spinner. Pass "" to disable.
+func SetDataDir(dir string) {
+	if dir == "" {
+		vm.SetRMSPath("")
+		return
+	}
+	vm.SetRMSPath(filepath.Join(dir, "rms.json"))
 }
 
 // NewBridge constructs an uninitialised Bridge. Call LoadJAR to boot the VM.

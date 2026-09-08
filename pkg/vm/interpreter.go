@@ -33,10 +33,6 @@ type VMContext struct {
 	RecordStores           map[string]*RecordStoreData
 	ActiveSocket           *midp.SocketTap
 	RepaintPending         bool
-	debugAppearanceSynced  bool
-	debugAppearanceWrites  int
-	debugPlayerSpriteCalls int
-	debugLayerSelections   int
 	mu                     sync.RWMutex
 	// execMu serializes top-level interpretation so Thread.start goroutines
 	// cannot interleave with startApp/paint and leave game statics half-init.
@@ -191,9 +187,7 @@ func (ctx *VMContext) SyncPlayerAppearance() {
 		bmBZ := targetBM.GetField("bZ")
 		bmCA := targetBM.GetField("ca")
 		bmBX := targetBM.GetField("bX")
-		bmCD := targetBM.GetField("cd")
 		bmCE := targetBM.GetField("ce")
-		bmDY := targetBM.GetField("dY")
 
 		if bmBZ.Num > 0 {
 			activePlayer.SetField("bZ", bmBZ)
@@ -204,15 +198,17 @@ func (ctx *VMContext) SyncPlayerAppearance() {
 		if bmBX.Num > 0 {
 			activePlayer.SetField("bX", bmBX)
 		}
-		if bmCD.Num > 0 {
-			activePlayer.SetField("cd", bmCD)
-		}
 		if bmCE.Num > 0 {
 			activePlayer.SetField("ce", bmCE)
 		}
-		if bmDY.Num > 0 {
-			activePlayer.SetField("dY", bmDY)
-		}
+		// Wings (cd) and weapon (dY) are deliberately NOT copied from the
+		// character-select entry. Those ids only address sprites in the select
+		// screen's own numbering: carrying them in-game asks the game for files
+		// the JAR does not contain (e.g. cd=21 -> /x1/c/wing/b21_wing.png, which
+		// only exists for multiples of 4, and dY=18 -> /x1/weapon/phapsu/18.png,
+		// which only goes up to 17). createImage then throws and the layer draws
+		// nothing, which is why equipment rendered fully transparent. The in-game
+		// appearance packet owns these two fields.
 
 		bmBY := targetBM.GetField("bY")
 		bmCC := targetBM.GetField("cc")
@@ -242,10 +238,8 @@ func (ctx *VMContext) SyncPlayerAppearance() {
 		if bmCP.Ref != nil && activePlayer.GetField("cP").Ref == nil {
 			activePlayer.SetField("cP", bmCP)
 		}
-		log.Printf("[SYNC-PLAYER] Synchronized player '%s' (ID %d) appearance from character select: bZ=%d, ca=%d, bX=%d, cd=%d, dY=%d, cc=%d",
-			charName, charID, activePlayer.GetField("bZ").Num, activePlayer.GetField("ca").Num, activePlayer.GetField("bX").Num, activePlayer.GetField("cd").Num, activePlayer.GetField("dY").Num, activePlayer.GetField("cc").Num)
-		ctx.debugAppearanceSynced = true
-		log.Printf("[DEBUG-APPEARANCE-SYNC] cn.g=%p active=%p name=%q id=%d", cnG, activePlayer, charName, charID)
+		log.Printf("[SYNC-PLAYER] Synchronized player '%s' (ID %d) appearance from character select: bZ=%d, ca=%d, bX=%d, cc=%d",
+			charName, charID, activePlayer.GetField("bZ").Num, activePlayer.GetField("ca").Num, activePlayer.GetField("bX").Num, activePlayer.GetField("cc").Num)
 	}
 }
 
@@ -467,30 +461,6 @@ func (ctx *VMContext) resolveVirtualMethod(recv interface{}, mName, mDesc string
 // ResolveVirtualMethod exposes virtual method lookup for bridge dispatch.
 func (ctx *VMContext) ResolveVirtualMethod(recv interface{}, mName, mDesc string) (*classfile.ClassFile, *classfile.MethodInfo) {
 	return ctx.resolveVirtualMethod(recv, mName, mDesc)
-}
-
-// adjustKnightOnlinePotionFallback keeps the JAR's local potion numbering and
-// its image-record numbering aligned. The local path starts at potionIcon_01,
-// while the bundled image records start at image4001; only bk.e -> bk.o is
-// adjusted so item, NPC, monster, and other icon fallbacks remain unchanged.
-func adjustKnightOnlinePotionFallback(
-	callerClassName string,
-	callerMethodName string,
-	targetClassName string,
-	targetMethodName string,
-	targetDescriptor string,
-	parameterSlots []Slot,
-) {
-	if callerClassName != "bk" || callerMethodName != "e" {
-		return
-	}
-	if targetClassName != "bk" || targetMethodName != "o" || targetDescriptor != "(S)Laq;" {
-		return
-	}
-	if len(parameterSlots) == 0 || parameterSlots[0].Num < 4000 {
-		return
-	}
-	parameterSlots[0].Num++
 }
 
 func (ctx *VMContext) InvokeMethod(cf *classfile.ClassFile, method *classfile.MethodInfo, args []Slot) (res Slot, err error) {
@@ -750,14 +720,27 @@ func (ctx *VMContext) ExecuteBytecode(cf *classfile.ClassFile, cfFrame codeWithF
 		case OpSaload:
 			idx := frame.OperandStack.PopInt()
 			arrRef := frame.OperandStack.PopRef()
+			// short[] backing may be []int16 (the faithful newarray-short type) but
+			// some paths hand this array over as []int32 or []Slot; saload must read
+			// them all, or it silently returns 0 and callers like fa.p treat a real
+			// equipment id as "empty" — leaving body/hat layers invisible. Mirror the
+			// permissiveness of iaload/aaload.
 			if shorts, ok := arrRef.([]int16); ok && idx >= 0 && int(idx) < len(shorts) {
 				frame.OperandStack.PushInt(int32(shorts[idx]))
+			} else if ints, ok := arrRef.([]int32); ok && idx >= 0 && int(idx) < len(ints) {
+				frame.OperandStack.PushInt(ints[idx])
+			} else if slots, ok := arrRef.([]Slot); ok && idx >= 0 && int(idx) < len(slots) {
+				frame.OperandStack.PushInt(slots[idx].Num)
 			} else if b, ok := arrRef.([]byte); ok && idx >= 0 && int(idx)*2+1 < len(b) {
 				val := int16(binary.BigEndian.Uint16(b[idx*2:]))
 				frame.OperandStack.PushInt(int32(val))
 			} else if obj, ok := arrRef.(*Object); ok && obj != nil {
 				if shorts, ok := obj.Extra.([]int16); ok && idx >= 0 && int(idx) < len(shorts) {
 					frame.OperandStack.PushInt(int32(shorts[idx]))
+				} else if ints, ok := obj.Extra.([]int32); ok && idx >= 0 && int(idx) < len(ints) {
+					frame.OperandStack.PushInt(ints[idx])
+				} else if slots, ok := obj.Extra.([]Slot); ok && idx >= 0 && int(idx) < len(slots) {
+					frame.OperandStack.PushInt(slots[idx].Num)
 				} else {
 					frame.OperandStack.PushInt(0)
 				}
@@ -1303,13 +1286,6 @@ func (ctx *VMContext) ExecuteBytecode(cf *classfile.ClassFile, cfFrame codeWithF
 			}
 			return Slot{}, nil
 		case OpIreturn:
-			if ctx.debugAppearanceSynced && ctx.debugLayerSelections < 80 && cf != nil && cf.GetClassName() == "fa" && cfFrame.method != nil && cf.ConstantPool.GetUtf8(cfFrame.method.NameIndex) == "p" {
-				cnG, _ := ctx.GetStaticField("cn.g").Ref.(*Object)
-				if frame.LocalVars.GetRef(0) == cnG && frame.OperandStack.size > 0 {
-					ctx.debugLayerSelections++
-					log.Printf("[DEBUG-LAYER-SELECT] index=%d result=%d dG=%v", frame.LocalVars.GetInt(1), frame.OperandStack.slots[frame.OperandStack.size-1].Num, cnG.GetField("dG").Ref)
-				}
-			}
 			return Slot{Num: frame.OperandStack.PopInt()}, nil
 		case OpAreturn:
 			return Slot{Ref: frame.OperandStack.PopRef()}, nil
@@ -1513,20 +1489,6 @@ func (ctx *VMContext) ExecuteBytecode(cf *classfile.ClassFile, cfFrame codeWithF
 						valSlot := frame.OperandStack.PopSlot()
 						objRef := frame.OperandStack.PopRef()
 						if obj, ok := objRef.(*Object); ok && obj != nil {
-							if ctx.debugAppearanceSynced && ctx.debugAppearanceWrites < 100 &&
-								(fName == "bZ" || fName == "ca" || fName == "bX" || fName == "cd" || fName == "ce" || fName == "dY" || fName == "bY" || fName == "cb" || fName == "cc") {
-								name := extractString(obj.GetField("cC").Ref)
-								cnG, _ := ctx.GetStaticField("cn.g").Ref.(*Object)
-								if obj == cnG || strings.EqualFold(name, "vjncible") {
-									callerMethod := ""
-									if cfFrame.method != nil {
-										callerMethod = cf.ConstantPool.GetUtf8(cfFrame.method.NameIndex)
-									}
-									ctx.debugAppearanceWrites++
-									log.Printf("[DEBUG-APPEARANCE-WRITE] caller=%s.%s object=%p is-cn.g=%t name=%q field=%s old=%d new=%d",
-										cf.GetClassName(), callerMethod, obj, obj == cnG, name, fName, obj.GetField(fName).Num, valSlot.Num)
-								}
-							}
 							obj.SetField(fName, valSlot)
 						}
 					}
@@ -1576,27 +1538,6 @@ func (ctx *VMContext) ExecuteBytecode(cf *classfile.ClassFile, cfFrame codeWithF
 							var receiver Slot
 							if opcode != OpInvokestatic {
 								receiver = frame.OperandStack.PopSlot()
-							}
-							callerMethodName := ""
-							if cfFrame.method != nil {
-								callerMethodName = cf.ConstantPool.GetUtf8(cfFrame.method.NameIndex)
-							}
-							adjustKnightOnlinePotionFallback(
-								cf.GetClassName(),
-								callerMethodName,
-								clsName,
-								mName,
-								mDesc,
-								paramSlots,
-							)
-							if ctx.debugAppearanceSynced && ctx.debugPlayerSpriteCalls < 80 &&
-								cf.GetClassName() == "fa" && clsName == "ak" && mName == "d" && mDesc == "(II)Lff;" && len(paramSlots) == 2 {
-								cnG, _ := ctx.GetStaticField("cn.g").Ref.(*Object)
-								if frame.LocalVars.GetRef(0) == cnG {
-									ctx.debugPlayerSpriteCalls++
-									log.Printf("[DEBUG-PLAYER-SPRITE] caller=fa.%s layer=%d sprite=%d direction=%d frame=%d",
-										callerMethodName, paramSlots[0].Num, paramSlots[1].Num, cnG.GetField("cH").Num, cnG.GetField("cf").Num)
-								}
 							}
 							if opcode != OpInvokestatic {
 								args = append(args, receiver)
@@ -2802,6 +2743,7 @@ func (ctx *VMContext) handleNativeCall(clsName, mName, mDesc string, frame *Fram
 					store.Records = append(store.Records, b)
 					recID = int32(len(store.Records))
 					log.Printf("[RMS] addRecord #%d (%d bytes)", recID, len(b))
+					ctx.saveRMS()
 				}
 			}
 			frame.OperandStack.PushInt(recID)
@@ -2880,6 +2822,7 @@ func (ctx *VMContext) handleNativeCall(clsName, mName, mDesc string, frame *Fram
 							copy(b, srcBytes[offset:offset+numBytes])
 							store.Records[idx] = b
 							log.Printf("[RMS] setRecord #%d (%d bytes)", recID, len(b))
+							ctx.saveRMS()
 						}
 					}
 				}
