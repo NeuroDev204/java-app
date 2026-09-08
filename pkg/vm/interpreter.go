@@ -23,6 +23,78 @@ type RecordStoreData struct {
 	Records [][]byte
 }
 
+// storeDownloadedIcon saves a server-sent item icon (opcode -51 reply) into a
+// persisted RMS store named "dlicon<id>". The game requests "resLocal" icons
+// (not shipped in the JAR) via Image.createImage("/resLocal/..."); the desktop
+// engine serves those from local disk, but this VM only reads the JAR, and the
+// game's own fallback (bk.o with an m-false id) never persists them. Persisting
+// here (and preloading via the RMS baseline on the next launch) lets createImage
+// serve the icon on the first render, so the slot shows the real icon instead of
+// the gold-coin placeholder.
+func (ctx *VMContext) storeDownloadedIcon(id int32, png []byte) {
+	name := "dlicon" + strconv.Itoa(int(id))
+	ctx.mu.Lock()
+	if ctx.RecordStores == nil {
+		ctx.RecordStores = make(map[string]*RecordStoreData)
+	}
+	if rs := ctx.RecordStores[name]; rs != nil && len(rs.Records) == 1 && len(rs.Records[0]) == len(png) {
+		ctx.mu.Unlock() // already stored, avoid rewriting rms.json every frame
+		return
+	}
+	ctx.RecordStores[name] = &RecordStoreData{Records: [][]byte{png}}
+	ctx.mu.Unlock()
+	ctx.saveRMS()
+}
+
+// loadDownloadedIcon returns a previously captured icon for the given id, or nil.
+func (ctx *VMContext) loadDownloadedIcon(id int32) []byte {
+	name := "dlicon" + strconv.Itoa(int(id))
+	ctx.mu.RLock()
+	defer ctx.mu.RUnlock()
+	if rs := ctx.RecordStores[name]; rs != nil && len(rs.Records) == 1 {
+		return rs.Records[0]
+	}
+	return nil
+}
+
+// resLocalIconID maps a /resLocal/... createImage path to the download id the
+// game requests for it. Offsets match the bk.d/f/k/e icon getters:
+//
+//	/resLocal/icon/icon_<N>.png            -> N + 2000   (bk.d)
+//	/resLocal/iconq/<N>.png                -> N + 5000   (bk.f)
+//	/resLocal/pet/icon/icon_pet_<N>.png    -> N + 10000  (bk.k)
+//	/resLocal/potion/potionIcon_<NN>.png   -> (NN-1) + 4000 (bk.e; path NN = id+1)
+func resLocalIconID(path string) (int32, bool) {
+	i := strings.Index(path, "resLocal/")
+	if i < 0 {
+		return 0, false
+	}
+	sub := strings.TrimSuffix(path[i:], ".png")
+	numAfter := func(prefix string) (int32, bool) {
+		if !strings.HasPrefix(sub, prefix) {
+			return 0, false
+		}
+		n, err := strconv.Atoi(sub[len(prefix):])
+		if err != nil {
+			return 0, false
+		}
+		return int32(n), true
+	}
+	if n, ok := numAfter("resLocal/icon/icon_"); ok {
+		return n + 2000, true
+	}
+	if n, ok := numAfter("resLocal/pet/icon/icon_pet_"); ok {
+		return n + 10000, true
+	}
+	if n, ok := numAfter("resLocal/iconq/"); ok {
+		return n + 5000, true
+	}
+	if n, ok := numAfter("resLocal/potion/potionIcon_"); ok {
+		return n - 1 + 4000, true
+	}
+	return 0, false
+}
+
 type VMContext struct {
 	ClassLoader        *classfile.ClassLoader
 	StaticFields       map[string]Slot
@@ -1505,6 +1577,21 @@ func (ctx *VMContext) ExecuteBytecode(cf *classfile.ClassFile, cfFrame codeWithF
 				clsName := cf.ConstantPool.GetClassName(member.ClassIndex)
 				mName, mDesc := cf.ConstantPool.GetNameAndType(member.NameAndTypeIndex)
 
+				// Capture server icon replies (opcode -51). Every incoming message
+				// is built as new ep(opcode, payload); for -51 the payload is
+				// [id:2][png:rest]. Cache id->png so createImage can serve resLocal
+				// icons the JAR does not contain.
+				if clsName == "ep" && mName == "<init>" && mDesc == "(B[B)V" && frame.OperandStack.size >= 3 {
+					op := frame.OperandStack.slots[frame.OperandStack.size-2].Num
+					if op == -51 || op&0xFF == 0xCD {
+						if payload := extractBytes(frame.OperandStack.slots[frame.OperandStack.size-1].Ref); len(payload) > 2 {
+							id := int32(int16(uint16(payload[0])<<8 | uint16(payload[1])))
+							png := make([]byte, len(payload)-2)
+							copy(png, payload[2:])
+							ctx.storeDownloadedIcon(id, png)
+						}
+					}
+				}
 				if clsName == "javax/microedition/lcdui/Graphics" || isGraphicsMethodName(mName) {
 					ctx.handleNativeCall("javax/microedition/lcdui/Graphics", mName, mDesc, frame, opcode)
 				} else if strings.HasPrefix(clsName, "javax/microedition/") || strings.HasPrefix(clsName, "java/") {
@@ -3531,6 +3618,17 @@ func (ctx *VMContext) handleNativeCall(clsName, mName, mDesc string, frame *Fram
 						}
 					} else {
 						log.Printf("[IMAGE-NOT-FOUND] Resource %s not found in JAR", resName)
+					}
+					// resLocal icons live on the server, not in the JAR. Serve the
+					// one captured from its -51 reply, if we have it.
+					if id, ok := resLocalIconID(resName); ok {
+						if png := ctx.loadDownloadedIcon(id); png != nil {
+							if img, err := midp.DecodeImage(png); err == nil && img != nil {
+								log.Printf("[IMAGE-RESLOCAL] Served %s from downloaded icon %d (%dx%d)", resName, id, img.Bounds().Dx(), img.Bounds().Dy())
+								frame.OperandStack.PushRef(&Object{Extra: img})
+								return
+							}
+						}
 					}
 				}
 				frame.PendingException = ctx.NewException("java/io/IOException", "Resource not found: "+resName)
