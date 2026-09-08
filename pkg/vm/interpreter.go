@@ -24,16 +24,16 @@ type RecordStoreData struct {
 }
 
 type VMContext struct {
-	ClassLoader            *classfile.ClassLoader
-	StaticFields           map[string]Slot
-	Graphics               *midp.Graphics
-	CurrentCanvas          *Object
-	PendingTextBox         *Object
-	InitializedClasses     map[string]bool
-	RecordStores           map[string]*RecordStoreData
-	ActiveSocket           *midp.SocketTap
-	RepaintPending         bool
-	mu                     sync.RWMutex
+	ClassLoader        *classfile.ClassLoader
+	StaticFields       map[string]Slot
+	Graphics           *midp.Graphics
+	CurrentCanvas      *Object
+	PendingTextBox     *Object
+	InitializedClasses map[string]bool
+	RecordStores       map[string]*RecordStoreData
+	ActiveSocket       *midp.SocketTap
+	RepaintPending     bool
+	mu                 sync.RWMutex
 	// execMu serializes top-level interpretation so Thread.start goroutines
 	// cannot interleave with startApp/paint and leave game statics half-init.
 	execMu sync.Mutex
@@ -2464,6 +2464,10 @@ func (ctx *VMContext) handleNativeCall(clsName, mName, mDesc string, frame *Fram
 						frame.OperandStack.PushInt(int32(b))
 						return
 					}
+					// Real DataInputStream.readByte throws at end of stream; the
+					// game relies on this to leave optional trailing fields unset.
+					frame.PendingException = ctx.NewException("java/io/EOFException", "EOF in readByte")
+					return
 				}
 			}
 			frame.OperandStack.PushInt(-1)
@@ -2482,6 +2486,8 @@ func (ctx *VMContext) handleNativeCall(clsName, mName, mDesc string, frame *Fram
 						frame.OperandStack.PushInt(int32(b))
 						return
 					}
+					frame.PendingException = ctx.NewException("java/io/EOFException", "EOF in readUnsignedByte")
+					return
 				}
 			}
 			frame.OperandStack.PushInt(-1)
@@ -2520,7 +2526,11 @@ func (ctx *VMContext) handleNativeCall(clsName, mName, mDesc string, frame *Fram
 			}
 			if obj, ok := objRef.(*Object); ok {
 				if reader, ok := obj.Extra.(*DataStreamReader); ok {
-					frame.OperandStack.PushInt(int32(reader.ReadShort()))
+					if reader.Pos+2 <= len(reader.Data) {
+						frame.OperandStack.PushInt(int32(reader.ReadShort()))
+						return
+					}
+					frame.PendingException = ctx.NewException("java/io/EOFException", "EOF in readShort")
 					return
 				}
 			}
@@ -2540,6 +2550,8 @@ func (ctx *VMContext) handleNativeCall(clsName, mName, mDesc string, frame *Fram
 						frame.OperandStack.PushInt(int32(val))
 						return
 					}
+					frame.PendingException = ctx.NewException("java/io/EOFException", "EOF in readUnsignedShort")
+					return
 				}
 			}
 			frame.OperandStack.PushInt(0)
@@ -2552,7 +2564,11 @@ func (ctx *VMContext) handleNativeCall(clsName, mName, mDesc string, frame *Fram
 			}
 			if obj, ok := objRef.(*Object); ok {
 				if reader, ok := obj.Extra.(*DataStreamReader); ok {
-					frame.OperandStack.PushInt(reader.ReadInt())
+					if reader.Pos+4 <= len(reader.Data) {
+						frame.OperandStack.PushInt(reader.ReadInt())
+						return
+					}
+					frame.PendingException = ctx.NewException("java/io/EOFException", "EOF in readInt")
 					return
 				}
 			}
@@ -2574,9 +2590,13 @@ func (ctx *VMContext) handleNativeCall(clsName, mName, mDesc string, frame *Fram
 			}
 			if obj, ok := objRef.(*Object); ok {
 				if reader, ok := obj.Extra.(*DataStreamReader); ok {
-					value := uint64(reader.ReadLong())
-					frame.OperandStack.PushInt(int32(value >> 32))
-					frame.OperandStack.PushInt(int32(value))
+					if reader.Pos+8 <= len(reader.Data) {
+						value := uint64(reader.ReadLong())
+						frame.OperandStack.PushInt(int32(value >> 32))
+						frame.OperandStack.PushInt(int32(value))
+						return
+					}
+					frame.PendingException = ctx.NewException("java/io/EOFException", "EOF in readLong")
 					return
 				}
 			}

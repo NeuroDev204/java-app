@@ -374,6 +374,36 @@ func TestDataStreamReaderReadBytesAndUTF(t *testing.T) {
 	}
 }
 
+// A buffered DataInputStream must throw EOFException past end of stream, not
+// return 0. The game reads optional trailing appearance fields (er.b reads
+// aS/aT/aU/aV/aW) in try/catch and relies on the throw to leave them at -1;
+// returning 0 made fa.c() treat the player as mounted-and-covered and skip the
+// body/hat/hair layers, rendering the character transparent.
+func TestDataInputStreamReadThrowsEOF(t *testing.T) {
+	ctx := NewVMContext(nil, nil)
+	// Exactly one short of payload; a second readShort must hit EOF.
+	stream := &Object{Extra: &DataStreamReader{Data: []byte{0x00, 0x07}}}
+	frame := &Frame{OperandStack: NewOperandStack(8)}
+
+	frame.OperandStack.PushRef(stream)
+	ctx.handleNativeCall("java/io/DataInputStream", "readShort", "()S", frame, OpInvokevirtual)
+	if frame.PendingException != nil {
+		t.Fatalf("first readShort should succeed, got exception")
+	}
+	if got := frame.OperandStack.PopInt(); got != 7 {
+		t.Fatalf("first readShort = %d, want 7", got)
+	}
+
+	frame.OperandStack.PushRef(stream)
+	ctx.handleNativeCall("java/io/DataInputStream", "readShort", "()S", frame, OpInvokevirtual)
+	if frame.PendingException == nil {
+		t.Fatal("readShort past end of stream must set EOFException, not return 0")
+	}
+	if cls := frame.PendingException.Class.GetClassName(); cls != "java/io/EOFException" {
+		t.Fatalf("expected java/io/EOFException, got %s", cls)
+	}
+}
+
 func TestDataStreamReaderReadLong(t *testing.T) {
 	reader := &DataStreamReader{Data: []byte{0x01, 0x02, 0x03, 0x04, 0xA5, 0xB6, 0xC7, 0xD8}}
 
