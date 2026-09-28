@@ -89,14 +89,26 @@ public abstract class Canvas extends Displayable {
     }
 
     public void repaint() {
+        Display d = Display.getDisplay(null);
+        if (d != null && d.getCurrent() != null && d.getCurrent() != this) {
+            return;
+        }
         serviceRepaints();
     }
 
     public void repaint(int x, int y, int width, int height) {
+        Display d = Display.getDisplay(null);
+        if (d != null && d.getCurrent() != null && d.getCurrent() != this) {
+            return;
+        }
         serviceRepaints();
     }
 
     public void serviceRepaints() {
+        Display d = Display.getDisplay(null);
+        if (d != null && d.getCurrent() != null && d.getCurrent() != this) {
+            return;
+        }
         paint(new Graphics());
         flushGraphics();
     }
