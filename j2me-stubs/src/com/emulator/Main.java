@@ -8,6 +8,8 @@ import javax.microedition.midlet.MIDlet;
 public class Main {
     private static MIDlet currentMidlet;
 
+    public static ClassLoader j2meClassLoader;
+
     public static void startApp(String jarPath) {
         try {
             System.out.println("[Main] Loading J2ME JAR: " + jarPath);
@@ -22,6 +24,7 @@ public class Main {
                 Main.class.getClassLoader()
             );
 
+            j2meClassLoader = classLoader;
             Thread.currentThread().setContextClassLoader(classLoader);
 
             String midletClassName = "com.silverknight.TemMidlet";

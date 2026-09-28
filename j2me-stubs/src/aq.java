@@ -19,22 +19,39 @@ public final class aq {
         }
     }
 
+    public static InputStream getResource(String path) {
+        if (path == null) return null;
+        String cleanPath = path.startsWith("/") ? path.substring(1) : path;
+        String slashPath = "/" + cleanPath;
+        InputStream is = null;
+        if (com.emulator.Main.j2meClassLoader != null) {
+            is = com.emulator.Main.j2meClassLoader.getResourceAsStream(cleanPath);
+        }
+        if (is == null) {
+            ClassLoader ccl = Thread.currentThread().getContextClassLoader();
+            if (ccl != null) {
+                is = ccl.getResourceAsStream(cleanPath);
+            }
+        }
+        if (is == null) {
+            is = com.emulator.Main.class.getResourceAsStream(slashPath);
+        }
+        if (is == null) {
+            is = aq.class.getResourceAsStream(slashPath);
+        }
+        return is;
+    }
+
     public static DataInputStream b(String path) {
         if (path == null) return null;
-        if (!path.startsWith("/")) {
-            path = "/" + path;
-        }
-        InputStream is = com.emulator.Main.class.getResourceAsStream(path);
+        InputStream is = getResource(path);
         if (is == null && path.endsWith(".img")) {
             String p2 = path.substring(0, path.length() - 4) + ".png";
-            is = com.emulator.Main.class.getResourceAsStream(p2);
+            is = getResource(p2);
         }
         if (is == null && path.endsWith("img")) {
             String p2 = path.substring(0, path.length() - 3) + "png";
-            is = com.emulator.Main.class.getResourceAsStream(p2);
-        }
-        if (is == null) {
-            is = aq.class.getResourceAsStream(path);
+            is = getResource(p2);
         }
         if (is != null) {
             return new DataInputStream(is);
