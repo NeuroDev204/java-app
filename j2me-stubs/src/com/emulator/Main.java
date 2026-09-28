@@ -24,7 +24,25 @@ public class Main {
 
             Thread.currentThread().setContextClassLoader(classLoader);
 
-            Class<?> midletClass = classLoader.loadClass("com.silverknight.TemMidlet");
+            String midletClassName = "com.silverknight.TemMidlet";
+            try {
+                java.util.jar.JarFile jarFile = new java.util.jar.JarFile(file);
+                java.util.jar.Manifest manifest = jarFile.getManifest();
+                if (manifest != null) {
+                    String midletAttr = manifest.getMainAttributes().getValue("MIDlet-1");
+                    if (midletAttr != null) {
+                        String[] parts = midletAttr.split(",");
+                        if (parts.length >= 3) {
+                            midletClassName = parts[2].trim();
+                        }
+                    }
+                }
+                jarFile.close();
+            } catch (Exception e) {
+                System.out.println("[Main] Notice: Manifest read fallback to " + midletClassName + ": " + e.getMessage());
+            }
+
+            Class<?> midletClass = classLoader.loadClass(midletClassName);
             System.out.println("[Main] Loaded MIDlet class: " + midletClass.getName());
 
             MIDlet midlet = (MIDlet) midletClass.getDeclaredConstructor().newInstance();
@@ -54,7 +72,10 @@ public class Main {
     }
 
     public static void main(String[] args) {
-        String path = (args != null && args.length > 0) ? args[0] : "/home/neuro/Downloads/KnightOnline_402.jar";
+        String path = (args != null && args.length > 0) ? args[0] : "/home/neuro/Downloads/x2.jar";
+        if (!new File(path).exists()) {
+            path = "/home/neuro/Downloads/KnightOnline_402.jar";
+        }
         startApp(path);
     }
 }

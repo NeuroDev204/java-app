@@ -268,7 +268,10 @@ func main() {
 	runtime.LockOSThread()
 
 	// Parse arguments
-	defaultJar := "/home/neuro/Downloads/KnightOnline_402.jar"
+	defaultJar := "/home/neuro/Downloads/x2.jar"
+	if _, err := os.Stat(defaultJar); os.IsNotExist(err) {
+		defaultJar = "/home/neuro/Downloads/KnightOnline_402.jar"
+	}
 	for _, arg := range os.Args[1:] {
 		if !strings.HasPrefix(arg, "-") {
 			defaultJar = arg
