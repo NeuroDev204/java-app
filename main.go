@@ -123,6 +123,7 @@ func (g *Game) Update() error {
 		ebiten.KeyUp, ebiten.KeyDown, ebiten.KeyLeft, ebiten.KeyRight, ebiten.KeyEnter,
 		ebiten.KeyBackspace,
 		ebiten.KeyF1, ebiten.KeyF2,
+		ebiten.KeyTab, ebiten.KeyNumpadMultiply,
 	}
 	// Append A-Z dynamically
 	for k := ebiten.KeyA; k <= ebiten.KeyZ; k++ {

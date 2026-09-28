@@ -96,10 +96,6 @@ func InitJVM(classpath string) (*JVM, error) {
 		}
 	}
 
-	if _, err := os.Stat("/home/neuro/Downloads/KnightOnline_402.jar"); err == nil {
-		finalCP = finalCP + ":/home/neuro/Downloads/KnightOnline_402.jar"
-	}
-
 	optString := "-Djava.class.path=" + finalCP
 
 	cOpt := C.CString(optString)

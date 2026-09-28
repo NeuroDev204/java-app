@@ -22,7 +22,25 @@ public class Main {
             URLClassLoader classLoader = new URLClassLoader(
                 new URL[]{ file.toURI().toURL() },
                 Main.class.getClassLoader()
-            );
+            ) {
+                protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+                    Class<?> c = findLoadedClass(name);
+                    if (c == null) {
+                        if (name.startsWith("java.") || name.startsWith("javax.microedition.") || name.startsWith("com.emulator.") || name.equals("aq") || name.equals("x2.aq")) {
+                            return super.loadClass(name, resolve);
+                        }
+                        try {
+                            c = findClass(name);
+                        } catch (ClassNotFoundException e) {
+                            c = super.loadClass(name, resolve);
+                        }
+                    }
+                    if (resolve) {
+                        resolveClass(c);
+                    }
+                    return c;
+                }
+            };
 
             j2meClassLoader = classLoader;
             Thread.currentThread().setContextClassLoader(classLoader);

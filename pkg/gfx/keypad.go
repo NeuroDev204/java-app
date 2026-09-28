@@ -45,6 +45,10 @@ func MapEbitenKeyToJ2ME(key ebiten.Key) int {
 		return -6 // SOFTKEY 1 (Trái)
 	case ebiten.KeyF2:
 		return -7 // SOFTKEY 2 (Phải)
+	case ebiten.KeyTab:
+		return 35 // '#' / KEY_POUND (Switch instance)
+	case ebiten.KeyNumpadMultiply:
+		return 42 // '*' / KEY_STAR (Switch instance)
 	default:
 		return 0
 	}
