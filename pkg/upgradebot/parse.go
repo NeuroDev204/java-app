@@ -46,6 +46,38 @@ func IsIgnorableResult(msg string) bool {
 		strings.Contains(lower, "that bai")
 }
 
+func IsClover3(name string) bool {
+	if name == "" {
+		return false
+	}
+	lower := strings.ToLower(name)
+	return strings.Contains(lower, "cỏ 3") || strings.Contains(lower, "co 3") ||
+		strings.Contains(lower, "3 lá") || strings.Contains(lower, "3 la") ||
+		strings.Contains(lower, "cỏ ba lá") || strings.Contains(lower, "co ba la") ||
+		(strings.Contains(lower, "cỏ") && strings.Contains(lower, "3")) ||
+		(strings.Contains(lower, "co") && strings.Contains(lower, "3"))
+}
+
+func IsClover4(name string) bool {
+	if name == "" {
+		return false
+	}
+	lower := strings.ToLower(name)
+	return strings.Contains(lower, "cỏ 4") || strings.Contains(lower, "co 4") ||
+		strings.Contains(lower, "4 lá") || strings.Contains(lower, "4 la") ||
+		strings.Contains(lower, "cỏ bốn lá") || strings.Contains(lower, "co bon la") ||
+		(strings.Contains(lower, "cỏ") && strings.Contains(lower, "4")) ||
+		(strings.Contains(lower, "co") && strings.Contains(lower, "4"))
+}
+
+func IsInsurance(name string) bool {
+	if name == "" {
+		return false
+	}
+	lower := strings.ToLower(name)
+	return strings.Contains(lower, "bảo hiểm") || strings.Contains(lower, "bao hiem")
+}
+
 type Item struct {
 	ID        int16  `json:"id"`
 	Name      string `json:"name"`
@@ -69,6 +101,68 @@ func (s *Snapshot) Apply(msg *protocol.Message) {
 	}
 	if IsInGameOpcode(msg.Command) {
 		s.InGame = true
+	}
+	if msg.Command == -100 || msg.Command == 24 {
+		s.ParseInventory(msg)
+	}
+}
+
+func (s *Snapshot) ParseInventory(msg *protocol.Message) {
+	if msg == nil {
+		return
+	}
+	data := msg.GetData()
+	if len(data) == 0 {
+		return
+	}
+	copyMsg := protocol.NewMessageWithData(msg.Command, data)
+	gold, err := copyMsg.ReadLong()
+	if err == nil {
+		s.Gold = gold
+	}
+	itemCount, err := copyMsg.ReadShort()
+	if err != nil || itemCount <= 0 {
+		return
+	}
+
+	items := make([]*Item, 0, int(itemCount))
+	for i := 0; i < int(itemCount); i++ {
+		id, err := copyMsg.ReadShort()
+		if err != nil {
+			break
+		}
+		name, err := copyMsg.ReadUTF()
+		if err != nil {
+			break
+		}
+		itemType, err := copyMsg.ReadInt8()
+		if err != nil {
+			break
+		}
+		level, err := copyMsg.ReadInt8()
+		if err != nil {
+			break
+		}
+		qty, err := copyMsg.ReadInt()
+		if err != nil {
+			break
+		}
+		if qty <= 0 {
+			qty = 1
+		}
+
+		items = append(items, &Item{
+			ID:        id,
+			Name:      name,
+			Type:      itemType,
+			Level:     level,
+			Quantity:  int(qty),
+			IsClover3: IsClover3(name),
+			IsClover4: IsClover4(name),
+		})
+	}
+	if len(items) > 0 {
+		s.Items = items
 	}
 }
 

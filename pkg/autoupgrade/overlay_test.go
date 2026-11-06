@@ -108,6 +108,13 @@ func TestOverlay_HandleInput_EquipmentCycle(t *testing.T) {
 	if settings.SelectedItemIndex != 1 {
 		t.Errorf("expected SelectedItemIndex=1, got %d", settings.SelectedItemIndex)
 	}
+	if settings.Clover3Min != 0 || settings.Clover3Max != 0 || settings.Clover4Min != 0 || settings.Clover4Max != 0 {
+		t.Errorf("expected clover settings reset to 0, got c3=(%d..%d), c4=(%d..%d)",
+			settings.Clover3Min, settings.Clover3Max, settings.Clover4Min, settings.Clover4Max)
+	}
+	if !mockBridge.resetCloverCalled {
+		t.Errorf("expected mockBridge.ResetClover to have been called on equipment switch")
+	}
 
 	// Press Right again -> cycle wrap to item 0
 	overlay.HandleInput(map[ebiten.Key]bool{ebiten.KeyRight: true})

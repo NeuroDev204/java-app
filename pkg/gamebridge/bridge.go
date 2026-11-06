@@ -34,6 +34,7 @@ import (
 	"java-app/pkg/upgradebot"
 	"java-app/pkg/vm"
 	"log"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -117,6 +118,19 @@ type Bridge struct {
 	frameBuffer      []byte
 	lastRevision     uint64
 	lastSentRevision uint64
+}
+
+// SetDataDir gives the engine a writable directory in which to keep the MIDP
+// record store across launches. Call it before LoadJAR. Without it record
+// stores live in memory only, so everything the game downloads while playing —
+// item icons in particular — is discarded on exit and must be fetched again,
+// leaving inventory slots on the game's loading spinner. Pass "" to disable.
+func SetDataDir(dir string) {
+	if dir == "" {
+		vm.SetRMSPath("")
+		return
+	}
+	vm.SetRMSPath(filepath.Join(dir, "rms.json"))
 }
 
 // NewBridge constructs an uninitialised Bridge. Call LoadJAR to boot the VM.
@@ -615,9 +629,14 @@ func (b *Bridge) StartUpgrade(configJSON string) string {
 	}
 	b.maybeWireTapLocked()
 	bot := b.bot
+	vmCtx := b.vmCtx
 	b.mu.Unlock()
 	if bot == nil {
 		return "not connected"
+	}
+	// Sync VM memory inventory to bot snapshot before loop starts
+	if vmCtx != nil {
+		b.syncVMInventoryToBot(vmCtx, bot)
 	}
 	return bot.Start(cfg)
 }
@@ -641,6 +660,287 @@ func (b *Bridge) GetUpgradeStatus() string {
 		return emptyUpgradeStatusJSON
 	}
 	return bot.StatusJSON()
+}
+
+// GetInventoryJSON returns JSON representing the current bag items from VM memory or the upgrade bot snapshot.
+func (b *Bridge) GetInventoryJSON() string {
+	b.mu.Lock()
+	vmCtx := b.vmCtx
+	bot := b.bot
+	b.mu.Unlock()
+
+	// 1. Try reading live inventory directly from pure-Go VM memory
+	if vmCtx != nil {
+		if jsonStr := b.extractInventoryFromVM(vmCtx, bot); jsonStr != "" {
+			return jsonStr
+		}
+	}
+
+	// 2. Fallback to packet snapshot
+	if bot != nil {
+		return bot.InventoryJSON()
+	}
+
+	return `{"gold":0,"clover3Count":0,"clover4Count":0,"insuranceCount":0,"items":[]}`
+}
+
+func (b *Bridge) syncVMInventoryToBot(vmCtx *vm.VMContext, bot *upgradebot.Controller) {
+	vecData := findInventoryVector(vmCtx)
+	gold := findPlayerGold(vmCtx)
+	if vecData == nil {
+		if gold > 0 {
+			bot.SyncSnapshot(true, gold, nil)
+		}
+		return
+	}
+
+	size := vecData.Size()
+	botItems := make([]*upgradebot.Item, 0, size)
+	for i := 0; i < size; i++ {
+		itemObj, ok := vecData.Get(i).(*vm.Object)
+		if !ok || itemObj == nil {
+			continue
+		}
+		id := getItemID(itemObj)
+		typ := getItemType(itemObj)
+		lvl := getItemLevel(itemObj)
+		name := getItemName(vmCtx, itemObj, id)
+		qty := getItemQuantity(itemObj)
+		mat := getItemTypeMaterial(itemObj)
+
+		isC3 := upgradebot.IsClover3(name) || (typ == 7 && mat == 11)
+		isC4 := upgradebot.IsClover4(name) || (typ == 7 && mat == 12)
+
+		botItems = append(botItems, &upgradebot.Item{
+			ID:        id,
+			Name:      name,
+			Type:      typ,
+			Level:     lvl,
+			Quantity:  qty,
+			IsClover3: isC3,
+			IsClover4: isC4,
+		})
+	}
+	bot.SyncSnapshot(true, gold, botItems)
+}
+
+func (b *Bridge) extractInventoryFromVM(vmCtx *vm.VMContext, bot *upgradebot.Controller) string {
+	vecData := findInventoryVector(vmCtx)
+	gold := findPlayerGold(vmCtx)
+
+	type invItem struct {
+		ID       int16  `json:"id"`
+		Name     string `json:"name"`
+		Type     int8   `json:"type"`
+		Level    int8   `json:"level"`
+		Quantity int    `json:"quantity"`
+	}
+
+	var (
+		clover3Count   int
+		clover4Count   int
+		insuranceCount int
+		equipItems     []invItem
+		botItems       []*upgradebot.Item
+	)
+
+	if vecData != nil {
+		size := vecData.Size()
+		for i := 0; i < size; i++ {
+			itemObj, ok := vecData.Get(i).(*vm.Object)
+			if !ok || itemObj == nil {
+				continue
+			}
+
+			id := getItemID(itemObj)
+			typ := getItemType(itemObj)
+			lvl := getItemLevel(itemObj)
+			name := getItemName(vmCtx, itemObj, id)
+			qty := getItemQuantity(itemObj)
+			mat := getItemTypeMaterial(itemObj)
+
+			isC3 := upgradebot.IsClover3(name) || (typ == 7 && mat == 11)
+			isC4 := upgradebot.IsClover4(name) || (typ == 7 && mat == 12)
+			isIns := upgradebot.IsInsurance(name)
+
+			if isC4 {
+				clover4Count += qty
+			} else if isC3 {
+				clover3Count += qty
+			} else if isIns {
+				insuranceCount += qty
+			}
+
+			if typ != 7 {
+				equipItems = append(equipItems, invItem{
+					ID:       id,
+					Name:     name,
+					Type:     typ,
+					Level:    lvl,
+					Quantity: qty,
+				})
+			}
+
+			botItems = append(botItems, &upgradebot.Item{
+				ID:        id,
+				Name:      name,
+				Type:      typ,
+				Level:     lvl,
+				Quantity:  qty,
+				IsClover3: isC3,
+				IsClover4: isC4,
+			})
+		}
+	}
+
+	if bot != nil {
+		bot.SyncSnapshot(true, gold, botItems)
+	}
+
+	if equipItems == nil {
+		equipItems = []invItem{}
+	}
+
+	// If we found any inventory data or gold in VM memory, return JSON
+	if len(equipItems) > 0 || clover3Count > 0 || clover4Count > 0 || gold > 0 {
+		raw, err := json.Marshal(map[string]interface{}{
+			"gold":           gold,
+			"clover3Count":   clover3Count,
+			"clover4Count":   clover4Count,
+			"insuranceCount": insuranceCount,
+			"items":          equipItems,
+		})
+		if err == nil {
+			return string(raw)
+		}
+	}
+
+	return ""
+}
+
+func findInventoryVector(vmCtx *vm.VMContext) *vm.VectorData {
+	candidates := []string{
+		"bw.V", "bw/V",
+		"x2.bw.V", "x2/bw/V",
+		"GameObjects.Item.VecInvetoryPlayer", "GameObjects/Item.VecInvetoryPlayer",
+		"bw.VecInvetoryPlayer", "bw.W",
+	}
+	for _, cand := range candidates {
+		slot := vmCtx.GetStaticField(cand)
+		if obj, ok := slot.Ref.(*vm.Object); ok && obj != nil {
+			if vd, ok := obj.Extra.(*vm.VectorData); ok && vd != nil {
+				return vd
+			}
+			innerSlot := obj.GetField("a")
+			if innerObj, ok := innerSlot.Ref.(*vm.Object); ok && innerObj != nil {
+				if vd, ok := innerObj.Extra.(*vm.VectorData); ok && vd != nil {
+					return vd
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func findPlayerGold(vmCtx *vm.VMContext) int64 {
+	// 1. Static bq.g
+	goldCandidates := []string{"bq.g", "bq/g", "x2.bq.g", "x2/bq/g"}
+	for _, cand := range goldCandidates {
+		slot := vmCtx.GetStaticField(cand)
+		if slot.Num > 0 {
+			return int64(slot.Num)
+		}
+	}
+
+	// 2. Player object in cn.g
+	playerCandidates := []string{"cn.g", "cn/g", "x2.cn.g"}
+	for _, cand := range playerCandidates {
+		slot := vmCtx.GetStaticField(cand)
+		if pObj, ok := slot.Ref.(*vm.Object); ok && pObj != nil {
+			if pObj.HasField("g") && pObj.GetField("g").Num > 0 {
+				return int64(pObj.GetField("g").Num)
+			}
+			if pObj.HasField("coin") && pObj.GetField("coin").Num > 0 {
+				return int64(pObj.GetField("coin").Num)
+			}
+			if pObj.HasField("gold") && pObj.GetField("gold").Num > 0 {
+				return int64(pObj.GetField("gold").Num)
+			}
+		}
+	}
+
+	// 3. GameScreen.player.coin
+	gsCandidates := []string{"GameScreen/GameScreen.player", "GameScreen.GameScreen.player"}
+	for _, cand := range gsCandidates {
+		slot := vmCtx.GetStaticField(cand)
+		if pObj, ok := slot.Ref.(*vm.Object); ok && pObj != nil {
+			if pObj.HasField("coin") && pObj.GetField("coin").Num > 0 {
+				return int64(pObj.GetField("coin").Num)
+			}
+			if pObj.HasField("gold") && pObj.GetField("gold").Num > 0 {
+				return int64(pObj.GetField("gold").Num)
+			}
+		}
+	}
+	return 0
+}
+
+func getItemID(itemObj *vm.Object) int16 {
+	for _, fld := range []string{"O", "Id", "id"} {
+		if itemObj.HasField(fld) {
+			return int16(itemObj.GetField(fld).Num)
+		}
+	}
+	return 0
+}
+
+func getItemType(itemObj *vm.Object) int8 {
+	for _, fld := range []string{"u", "ItemCatagory", "type"} {
+		if itemObj.HasField(fld) {
+			return int8(itemObj.GetField(fld).Num)
+		}
+	}
+	return 0
+}
+
+func getItemLevel(itemObj *vm.Object) int8 {
+	for _, fld := range []string{"z", "tier", "level"} {
+		if itemObj.HasField(fld) {
+			return int8(itemObj.GetField(fld).Num)
+		}
+	}
+	return 0
+}
+
+func getItemName(vmCtx *vm.VMContext, itemObj *vm.Object, id int16) string {
+	for _, fld := range []string{"g", "itemName", "h", "content", "i", "name"} {
+		if itemObj.HasField(fld) {
+			if s := vmCtx.ExtractString(itemObj.GetField(fld).Ref); s != "" {
+				return s
+			}
+		}
+	}
+	return fmt.Sprintf("Vat pham #%d", id)
+}
+
+func getItemQuantity(itemObj *vm.Object) int {
+	for _, fld := range []string{"p", "numPotion", "timeUse", "quantity"} {
+		if itemObj.HasField(fld) {
+			if q := int(itemObj.GetField(fld).Num); q > 0 {
+				return q
+			}
+		}
+	}
+	return 1
+}
+
+func getItemTypeMaterial(itemObj *vm.Object) int {
+	for _, fld := range []string{"A", "typeMaterial"} {
+		if itemObj.HasField(fld) {
+			return int(itemObj.GetField(fld).Num)
+		}
+	}
+	return 0
 }
 
 // Stop halts the background loop and blocks until the goroutine exits.

@@ -26,7 +26,7 @@ public class Main {
                 protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
                     Class<?> c = findLoadedClass(name);
                     if (c == null) {
-                        if (name.startsWith("java.") || name.startsWith("javax.microedition.") || name.startsWith("com.emulator.") || name.equals("aq") || name.equals("x2.aq")) {
+                        if (name.startsWith("java.") || name.startsWith("javax.microedition.") || name.startsWith("com.emulator.") || name.equals("aq") || name.equals("x2.aq") || name.startsWith("CLib.mImage") || name.startsWith("CLib.TemGraphics")) {
                             return super.loadClass(name, resolve);
                         }
                         try {

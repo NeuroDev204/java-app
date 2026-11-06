@@ -462,6 +462,11 @@ func (b *TCPBridge) GetUpgradeStatusJson() (string, error) {
 	return string(data), nil
 }
 
+// ResetClover implements Bridge interface.
+func (b *TCPBridge) ResetClover() error {
+	return nil
+}
+
 // IsConnected returns connection state.
 func (b *TCPBridge) IsConnected() bool {
 	b.mu.RLock()

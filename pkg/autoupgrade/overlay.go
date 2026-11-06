@@ -223,12 +223,10 @@ func (o *Overlay) HandleInput(keyStates map[ebiten.Key]bool) {
 			if itemCount > 0 {
 				if rightPressed {
 					settings.SelectedItemIndex = (settings.SelectedItemIndex + 1) % itemCount
-					o.syncSelectedItem(settings, inv)
-					o.ctrl.UpdateSettings(settings)
+					o.onEquipmentChanged(settings, inv)
 				} else if leftPressed {
 					settings.SelectedItemIndex = (settings.SelectedItemIndex - 1 + itemCount) % itemCount
-					o.syncSelectedItem(settings, inv)
-					o.ctrl.UpdateSettings(settings)
+					o.onEquipmentChanged(settings, inv)
 				}
 			}
 
@@ -330,6 +328,20 @@ func (o *Overlay) syncSelectedItem(settings *UpgradeSettings, inv *InventoryData
 				}
 			}
 		}
+	}
+}
+
+func (o *Overlay) onEquipmentChanged(settings *UpgradeSettings, inv *InventoryData) {
+	o.syncSelectedItem(settings, inv)
+	// When switching equipment, reset clover config levels back to default off (+0..+0)
+	// and clear any clover attached in the game slot.
+	settings.Clover3Min = 0
+	settings.Clover3Max = 0
+	settings.Clover4Min = 0
+	settings.Clover4Max = 0
+	if o.ctrl != nil {
+		_ = o.ctrl.ResetClover()
+		o.ctrl.UpdateSettings(settings)
 	}
 }
 

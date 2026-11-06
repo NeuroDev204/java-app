@@ -9,6 +9,7 @@ import java.util.List;
  * AutoUpgrade: Java Runtime Hook bridging the active running J2ME JVM game session to Go.
  * Provides reflection-based inventory inspection, lucky clover / material counting,
  * and background automated equipment upgrading via packet dispatching.
+ * Supports both original un-obfuscated KnightOnline jars (v402/v403) and modded x2 jars.
  */
 public class AutoUpgrade {
 
@@ -34,6 +35,10 @@ public class AutoUpgrade {
     private static volatile int failCount = 0;
     private static volatile String lastStatusMessage = "Chua kich hoat";
 
+    private static volatile int lastAttachedCloverId = -1;
+    private static volatile int lastAttachedCloverType = -1;
+    private static volatile int lastUpgradedItemId = -1;
+
     // ANSI Color Constants for Terminal Output
     private static final String ANSI_RESET = "\u001B[0m";
     private static final String ANSI_RED = "\u001B[31m";
@@ -45,54 +50,363 @@ public class AutoUpgrade {
     private static final String ANSI_BOLD_YELLOW = "\u001B[1;33m";
     private static final String ANSI_BOLD_CYAN = "\u001B[1;36m";
 
-    private static void resetServerResponseState() {
+    public static class ItemInfo {
+        public int id;
+        public String name;
+        public int type;
+        public int level;
+        public int quantity;
+
+        public ItemInfo(int id, String name, int type, int level, int quantity) {
+            this.id = id;
+            this.name = name != null ? name : "";
+            this.type = type;
+            this.level = level;
+            this.quantity = quantity;
+        }
+    }
+
+    private static ClassLoader getGameClassLoader() {
+        if (com.emulator.Main.j2meClassLoader != null) {
+            return com.emulator.Main.j2meClassLoader;
+        }
+        ClassLoader cl = Thread.currentThread().getContextClassLoader();
+        if (cl != null) {
+            return cl;
+        }
+        return AutoUpgrade.class.getClassLoader();
+    }
+
+    private static String getActivePackagePrefix() {
         try {
             ClassLoader cl = getGameClassLoader();
-            Class<?> cClass = cl.loadClass("c");
-            Field bField = cClass.getDeclaredField("B");
-            Field fField = cClass.getDeclaredField("F");
-            bField.setAccessible(true);
-            fField.setAccessible(true);
-            bField.setByte(null, (byte) 0);
-            fField.set(null, null);
+            Class<?> x2Class = cl.loadClass("X2Midlet");
+            Field instField = x2Class.getField("instance");
+            Object x2Inst = instField.get(null);
+            if (x2Inst != null) {
+                Field curField = x2Class.getField("currentInstance");
+                int cur = curField.getInt(x2Inst);
+                if (cur == 2) {
+                    return "x2.";
+                }
+            }
+        } catch (Throwable ignored) {}
+        return "";
+    }
+
+    private static Class<?> findGameClass(String... candidateNames) {
+        ClassLoader cl = getGameClassLoader();
+        String prefix = getActivePackagePrefix();
+        for (String name : candidateNames) {
+            if (!prefix.isEmpty()) {
+                try {
+                    return cl.loadClass(prefix + name);
+                } catch (ClassNotFoundException ignored) {}
+            }
+            try {
+                return cl.loadClass(name);
+            } catch (ClassNotFoundException ignored) {}
+        }
+        return null;
+    }
+
+    private static Field findField(Class<?> clazz, String... candidateNames) {
+        if (clazz == null) return null;
+        for (String name : candidateNames) {
+            Class<?> cur = clazz;
+            while (cur != null && cur != Object.class) {
+                try {
+                    Field f = cur.getDeclaredField(name);
+                    f.setAccessible(true);
+                    return f;
+                } catch (NoSuchFieldException ignored) {
+                    cur = cur.getSuperclass();
+                }
+            }
+        }
+        return null;
+    }
+
+    private static Method findMethod(Class<?> clazz, String[] candidateNames, Class<?>... paramTypes) {
+        if (clazz == null) return null;
+        for (String name : candidateNames) {
+            Class<?> cur = clazz;
+            while (cur != null && cur != Object.class) {
+                try {
+                    Method m = cur.getDeclaredMethod(name, paramTypes);
+                    m.setAccessible(true);
+                    return m;
+                } catch (NoSuchMethodException ignored) {
+                    cur = cur.getSuperclass();
+                }
+            }
+        }
+        return null;
+    }
+
+    private static Class<?> getItemClass() {
+        return findGameClass("GameObjects.Item", "bw", "x2.bw");
+    }
+
+    private static Class<?> getVectorClass() {
+        return findGameClass("CLib.mVector", "et", "x2.et");
+    }
+
+    private static Class<?> getBlacksmithClass() {
+        return findGameClass("InterfaceComponents.TabRebuildItem", "c", "x2.c");
+    }
+
+    private static Class<?> getCanvasClass() {
+        return findGameClass("Main.GameCanvas", "fu", "x2.fu");
+    }
+
+    private static Class<?> getServiceClass() {
+        return findGameClass("netcommand.global.GlobalService", "q", "x2.q");
+    }
+
+    private static Object getInventoryVector() {
+        Class<?> itemClass = getItemClass();
+        if (itemClass == null) return null;
+        Field vField = findField(itemClass, "VecInvetoryPlayer", "V");
+        if (vField == null) return null;
+        try {
+            return vField.get(null);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static int getVectorSize(Object vecObj) {
+        if (vecObj == null) return 0;
+        try {
+            Method m = findMethod(vecObj.getClass(), new String[]{"size", "c"});
+            if (m != null) {
+                return ((Number) m.invoke(vecObj)).intValue();
+            }
+        } catch (Throwable ignored) {}
+        return 0;
+    }
+
+    private static Object getVectorElementAt(Object vecObj, int index) {
+        if (vecObj == null) return null;
+        try {
+            Method m = findMethod(vecObj.getClass(), new String[]{"elementAt", "a"}, int.class);
+            if (m != null) {
+                return m.invoke(vecObj, index);
+            }
+        } catch (Throwable ignored) {}
+        return null;
+    }
+
+    private static int getItemId(Object itemObj) {
+        if (itemObj == null) return 0;
+        try {
+            Field f = findField(itemObj.getClass(), "Id", "O");
+            if (f != null) return f.getInt(itemObj);
+        } catch (Throwable ignored) {}
+        return 0;
+    }
+
+    private static int getItemType(Object itemObj) {
+        if (itemObj == null) return 0;
+        try {
+            Field f = findField(itemObj.getClass(), "ItemCatagory", "u");
+            if (f != null) return f.getInt(itemObj);
+        } catch (Throwable ignored) {}
+        return 0;
+    }
+
+    private static int getItemLevel(Object itemObj) {
+        if (itemObj == null) return 0;
+        try {
+            Field f = findField(itemObj.getClass(), "tier", "z");
+            if (f != null) {
+                return f.getByte(itemObj) & 0xFF;
+            }
+        } catch (Throwable ignored) {}
+        return 0;
+    }
+
+    private static String getItemName(Object itemObj) {
+        if (itemObj == null) return "";
+        try {
+            Field fName = findField(itemObj.getClass(), "itemName", "g");
+            if (fName != null) {
+                String n = (String) fName.get(itemObj);
+                if (n != null && !n.trim().isEmpty()) return n;
+            }
+            Field fContent = findField(itemObj.getClass(), "content", "h");
+            if (fContent != null) {
+                String n = (String) fContent.get(itemObj);
+                if (n != null && !n.trim().isEmpty()) return n;
+            }
+            Field fExLv = findField(itemObj.getClass(), "itemNameExcludeLv", "i");
+            if (fExLv != null) {
+                String n = (String) fExLv.get(itemObj);
+                if (n != null && !n.trim().isEmpty()) return n;
+            }
+        } catch (Throwable ignored) {}
+        return "";
+    }
+
+    private static int getItemQuantity(Object itemObj) {
+        if (itemObj == null) return 1;
+        try {
+            Field fQty = findField(itemObj.getClass(), "numPotion", "p");
+            if (fQty != null) {
+                int q = fQty.getInt(itemObj);
+                if (q > 0) return q;
+            }
+            Field fTimeUse = findField(itemObj.getClass(), "timeUse");
+            if (fTimeUse != null) {
+                int q = fTimeUse.getInt(itemObj);
+                if (q > 0) return q;
+            }
+        } catch (Throwable ignored) {}
+        return 1;
+    }
+
+    private static int getItemTypeMaterial(Object itemObj) {
+        if (itemObj == null) return 0;
+        try {
+            Field f = findField(itemObj.getClass(), "typeMaterial", "A");
+            if (f != null) return f.getByte(itemObj) & 0xFF;
+        } catch (Throwable ignored) {}
+        return 0;
+    }
+
+    private static int getPlayerGold() {
+        // 1. Try GameScreen.player.coin / gold (bản gốc)
+        try {
+            Class<?> gsClass = findGameClass("GameScreen.GameScreen");
+            if (gsClass != null) {
+                Field pField = findField(gsClass, "player");
+                if (pField != null) {
+                    Object pObj = pField.get(null);
+                    if (pObj != null) {
+                        Field coinF = findField(pObj.getClass(), "coin", "gold");
+                        if (coinF != null) {
+                            Object val = coinF.get(pObj);
+                            if (val instanceof Number) {
+                                return ((Number) val).intValue();
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        // 2. Try bq.g (x2)
+        try {
+            Class<?> bqClass = findGameClass("bq", "x2.bq");
+            if (bqClass != null) {
+                Field goldField = findField(bqClass, "g");
+                if (goldField != null) {
+                    return goldField.getInt(null);
+                }
+            }
+        } catch (Throwable ignored) {}
+        return 0;
+    }
+
+    private static void resetServerResponseState() {
+        try {
+            Class<?> rebClass = getBlacksmithClass();
+            if (rebClass != null) {
+                Field bField = findField(rebClass, "isNextRebuild", "B");
+                Field fField = findField(rebClass, "contentShow", "F");
+                if (bField != null) bField.setByte(null, (byte) 0);
+                if (fField != null) fField.set(null, null);
+            }
         } catch (Throwable ignored) {}
     }
 
     private static boolean isServerResponseArrived() {
         try {
-            ClassLoader cl = getGameClassLoader();
-            Class<?> cClass = cl.loadClass("c");
-            Field bField = cClass.getDeclaredField("B");
-            bField.setAccessible(true);
-            return bField.getByte(null) == 1;
+            Class<?> rebClass = getBlacksmithClass();
+            if (rebClass != null) {
+                Field bField = findField(rebClass, "isNextRebuild", "B");
+                if (bField != null) return bField.getByte(null) == 1;
+            }
         } catch (Throwable ignored) {}
         return false;
     }
 
     private static String getServerResponseMsg() {
         try {
-            ClassLoader cl = getGameClassLoader();
-            Class<?> cClass = cl.loadClass("c");
-            Field fField = cClass.getDeclaredField("F");
-            fField.setAccessible(true);
-            return (String) fField.get(null);
+            Class<?> rebClass = getBlacksmithClass();
+            if (rebClass != null) {
+                Field fField = findField(rebClass, "contentShow", "F");
+                if (fField != null) return (String) fField.get(null);
+            }
         } catch (Throwable ignored) {}
         return null;
     }
 
     private static void dismissPopupDialog() {
         try {
-            ClassLoader cl = getGameClassLoader();
-            Class<?> fuClass = cl.loadClass("fu");
-            Field pField = fuClass.getDeclaredField("p");
-            pField.setAccessible(true);
-            Object pObj = pField.get(null);
-            if (pObj != null) {
-                Method fMethod = pObj.getClass().getDeclaredMethod("f");
-                fMethod.setAccessible(true);
-                fMethod.invoke(pObj);
+            Class<?> canClass = getCanvasClass();
+            if (canClass != null) {
+                Field pField = findField(canClass, "currentDialog", "p");
+                if (pField != null && pField.get(null) != null) {
+                    Method endM = findMethod(canClass, new String[]{"end_Dialog", "b"});
+                    if (endM != null) {
+                        endM.invoke(null);
+                        return;
+                    }
+                    Object pObj = pField.get(null);
+                    if (pObj != null) {
+                        Method fMethod = findMethod(pObj.getClass(), new String[]{"f", "closeDialog"});
+                        if (fMethod != null) fMethod.invoke(pObj);
+                    }
+                }
             }
         } catch (Throwable ignored) {}
+    }
+
+    /**
+     * Resets lucky clover state in client memory and sends Action 1 to remove clover from blacksmith slot on server.
+     */
+    public static synchronized void resetCloverSlot() {
+        try {
+            Class<?> rebClass = getBlacksmithClass();
+            int cloverIdToRemove = -1;
+            int cloverTypeToRemove = -1;
+
+            if (rebClass != null) {
+                Field isLuckyField = findField(rebClass, "isLucky", "D");
+                Field cloverField = findField(rebClass, "itemDaMayMan", "I");
+
+                if (cloverField != null) {
+                    Object currentClover = cloverField.get(null);
+                    if (currentClover != null) {
+                        cloverIdToRemove = getItemId(currentClover);
+                        cloverTypeToRemove = getItemType(currentClover);
+                    }
+                    cloverField.set(null, null);
+                }
+
+                if (isLuckyField != null) {
+                    isLuckyField.setBoolean(null, false);
+                }
+            }
+
+            if (cloverIdToRemove <= 0 && lastAttachedCloverId > 0) {
+                cloverIdToRemove = lastAttachedCloverId;
+                cloverTypeToRemove = lastAttachedCloverType;
+            }
+
+            if (cloverIdToRemove > 0 && cloverTypeToRemove >= 0) {
+                System.out.println(ANSI_CYAN + "[AutoUpgrade] Resetting clover: removing clover id=" + cloverIdToRemove + " type=" + cloverTypeToRemove + ANSI_RESET);
+                sendPacketB((byte) 1, (short) cloverIdToRemove, (byte) cloverTypeToRemove);
+                Thread.sleep(80);
+            }
+        } catch (Throwable t) {
+            System.err.println("[AutoUpgrade] resetCloverSlot error: " + t.getMessage());
+        } finally {
+            lastAttachedCloverId = -1;
+            lastAttachedCloverType = -1;
+        }
     }
 
     private static boolean isStopCondition(String msg) {
@@ -115,30 +429,6 @@ public class AutoUpgrade {
             return true;
         }
         return false;
-    }
-
-    public static class ItemInfo {
-        public int id;
-        public String name;
-        public int type;
-        public int level;
-        public int quantity;
-
-        public ItemInfo(int id, String name, int type, int level, int quantity) {
-            this.id = id;
-            this.name = name != null ? name : "";
-            this.type = type;
-            this.level = level;
-            this.quantity = quantity;
-        }
-    }
-
-    private static ClassLoader getGameClassLoader() {
-        ClassLoader cl = Thread.currentThread().getContextClassLoader();
-        if (cl != null) {
-            return cl;
-        }
-        return AutoUpgrade.class.getClassLoader();
     }
 
     private static String escapeJson(String s) {
@@ -195,16 +485,8 @@ public class AutoUpgrade {
         return (lower.contains("bảo hiểm") || lower.contains("bao hiem"));
     }
 
-    private static boolean isUpgradeStone(String name) {
-        if (name == null) return false;
-        String lower = name.toLowerCase();
-        return (lower.contains("đá") || lower.contains("da") ||
-                lower.contains("cường hóa") || lower.contains("cuong hoa") ||
-                lower.contains("nâng cấp") || lower.contains("nang cap"));
-    }
-
     /**
-     * Reads current bag items from bw.V and player stats.
+     * Reads current bag items and player stats into a JSON payload.
      */
     public static synchronized String getInventoryJson() {
         int gold = 0;
@@ -214,62 +496,30 @@ public class AutoUpgrade {
         List<ItemInfo> equipmentItems = new ArrayList<ItemInfo>();
 
         try {
-            ClassLoader cl = getGameClassLoader();
-            Class<?> bwClass = cl.loadClass("bw");
-            Field vField = bwClass.getDeclaredField("V");
-            vField.setAccessible(true);
-            Object vObj = vField.get(null);
-
+            Object vObj = getInventoryVector();
             if (vObj != null) {
-                Class<?> etClass = cl.loadClass("et");
-                Method sizeMethod = etClass.getDeclaredMethod("c");
-                Method getMethod = etClass.getDeclaredMethod("a", int.class);
-                sizeMethod.setAccessible(true);
-                getMethod.setAccessible(true);
-
-                int size = ((Integer) sizeMethod.invoke(vObj)).intValue();
-
-                Field idField = bwClass.getDeclaredField("O");
-                Field typeField = bwClass.getDeclaredField("u");
-                Field levelField = bwClass.getDeclaredField("z");
-                Field nameField = bwClass.getDeclaredField("g");
-                Field nameHField = bwClass.getDeclaredField("h");
-                Field nameIField = bwClass.getDeclaredField("i");
-                Field qtyField = bwClass.getDeclaredField("p");
-
-                idField.setAccessible(true);
-                typeField.setAccessible(true);
-                levelField.setAccessible(true);
-                nameField.setAccessible(true);
-                nameHField.setAccessible(true);
-                nameIField.setAccessible(true);
-                qtyField.setAccessible(true);
-
+                int size = getVectorSize(vObj);
                 for (int i = 0; i < size; i++) {
-                    Object itemObj = getMethod.invoke(vObj, i);
+                    Object itemObj = getVectorElementAt(vObj, i);
                     if (itemObj == null) continue;
 
-                    int id = idField.getInt(itemObj);
-                    int type = typeField.getInt(itemObj);
-                    int level = levelField.getByte(itemObj) & 0xFF;
-                    String name = (String) nameField.get(itemObj);
-                    if (name == null || name.trim().isEmpty()) {
-                        name = (String) nameHField.get(itemObj);
+                    int id = getItemId(itemObj);
+                    int type = getItemType(itemObj);
+                    int level = getItemLevel(itemObj);
+                    String name = getItemName(itemObj);
+                    if (name.isEmpty()) {
+                        name = "Vật phẩm #" + id;
                     }
-                    if (name == null || name.trim().isEmpty()) {
-                        name = (String) nameIField.get(itemObj);
-                    }
-                    if (name == null) name = "Vật phẩm #" + id;
 
-                    int qty = qtyField.getInt(itemObj);
-                    if (qty <= 0) qty = 1;
+                    int qty = getItemQuantity(itemObj);
+                    int typeMat = getItemTypeMaterial(itemObj);
 
                     // Material / Consumable count
-                    if (type == 7 || isClover3(name) || isClover4(name) || isInsurance(name)) {
-                        if (isClover3(name)) {
-                            clover3Count += qty;
-                        } else if (isClover4(name)) {
+                    if (type == 7 || typeMat == 11 || isClover3(name) || isClover4(name) || isInsurance(name)) {
+                        if (isClover4(name)) {
                             clover4Count += qty;
+                        } else if (isClover3(name) || (type == 7 && typeMat == 11)) {
+                            clover3Count += qty;
                         } else if (isInsurance(name)) {
                             insuranceCount += qty;
                         }
@@ -282,16 +532,7 @@ public class AutoUpgrade {
                 }
             }
 
-            // Read Gold from bq.g
-            try {
-                Class<?> bqClass = cl.loadClass("bq");
-                Field goldField = bqClass.getDeclaredField("g");
-                goldField.setAccessible(true);
-                gold = goldField.getInt(null);
-            } catch (Throwable t) {
-                System.err.println("[AutoUpgrade] Note: bq.g not available: " + t.getMessage());
-            }
-
+            gold = getPlayerGold();
         } catch (Throwable e) {
             System.err.println("[AutoUpgrade] Error reading inventory: " + e.getMessage());
             e.printStackTrace();
@@ -324,29 +565,14 @@ public class AutoUpgrade {
 
     private static Object findItemInInventory(int itemId, int itemType) {
         try {
-            ClassLoader cl = getGameClassLoader();
-            Class<?> bwClass = cl.loadClass("bw");
-            Field vField = bwClass.getDeclaredField("V");
-            vField.setAccessible(true);
-            Object vObj = vField.get(null);
+            Object vObj = getInventoryVector();
             if (vObj == null) return null;
 
-            Class<?> etClass = cl.loadClass("et");
-            Method sizeMethod = etClass.getDeclaredMethod("c");
-            Method getMethod = etClass.getDeclaredMethod("a", int.class);
-            sizeMethod.setAccessible(true);
-            getMethod.setAccessible(true);
-
-            int size = ((Integer) sizeMethod.invoke(vObj)).intValue();
-            Field idField = bwClass.getDeclaredField("O");
-            Field typeField = bwClass.getDeclaredField("u");
-            idField.setAccessible(true);
-            typeField.setAccessible(true);
-
+            int size = getVectorSize(vObj);
             for (int i = 0; i < size; i++) {
-                Object item = getMethod.invoke(vObj, i);
+                Object item = getVectorElementAt(vObj, i);
                 if (item == null) continue;
-                if (idField.getInt(item) == itemId && typeField.getInt(item) == itemType) {
+                if (getItemId(item) == itemId && getItemType(item) == itemType) {
                     return item;
                 }
             }
@@ -360,52 +586,21 @@ public class AutoUpgrade {
     private static Object findCloverInInventory(int cloverType) {
         // cloverType: 3 for Clover 3, 4 for Clover 4, 0 for Insurance
         try {
-            ClassLoader cl = getGameClassLoader();
-            Class<?> bwClass = cl.loadClass("bw");
-            Field vField = bwClass.getDeclaredField("V");
-            vField.setAccessible(true);
-            Object vObj = vField.get(null);
+            Object vObj = getInventoryVector();
             if (vObj == null) return null;
 
-            Class<?> etClass = cl.loadClass("et");
-            Method sizeMethod = etClass.getDeclaredMethod("c");
-            Method getMethod = etClass.getDeclaredMethod("a", int.class);
-            sizeMethod.setAccessible(true);
-            getMethod.setAccessible(true);
-
-            int size = ((Integer) sizeMethod.invoke(vObj)).intValue();
-            Field nameField = bwClass.getDeclaredField("g");
-            Field nameHField = bwClass.getDeclaredField("h");
-            Field nameIField = bwClass.getDeclaredField("i");
-            Field qtyField = bwClass.getDeclaredField("p");
-            Field typeField = bwClass.getDeclaredField("u");
-            Field aField = bwClass.getDeclaredField("A");
-
-            nameField.setAccessible(true);
-            nameHField.setAccessible(true);
-            nameIField.setAccessible(true);
-            qtyField.setAccessible(true);
-            typeField.setAccessible(true);
-            aField.setAccessible(true);
-
+            int size = getVectorSize(vObj);
             for (int i = 0; i < size; i++) {
-                Object item = getMethod.invoke(vObj, i);
+                Object item = getVectorElementAt(vObj, i);
                 if (item == null) continue;
-                String name = (String) nameField.get(item);
-                if (name == null || name.trim().isEmpty()) {
-                    name = (String) nameHField.get(item);
-                }
-                if (name == null || name.trim().isEmpty()) {
-                    name = (String) nameIField.get(item);
-                }
-                int qty = qtyField.getInt(item);
-                if (qty <= 0) qty = 1;
-                int type = typeField.getInt(item);
-                int aVal = aField.getByte(item) & 0xFF;
+                String name = getItemName(item);
+                int qty = getItemQuantity(item);
+                int type = getItemType(item);
+                int typeMat = getItemTypeMaterial(item);
 
                 if (cloverType == 3) {
                     if (isClover3(name) && qty > 0) return item;
-                    if (type == 7 && aVal == 11 && qty > 0 && !isClover4(name)) return item;
+                    if (type == 7 && typeMat == 11 && qty > 0 && !isClover4(name)) return item;
                 } else if (cloverType == 4) {
                     if (isClover4(name) && qty > 0) return item;
                 } else if (cloverType == 0) {
@@ -419,94 +614,33 @@ public class AutoUpgrade {
         return null;
     }
 
-    private static int getItemLevel(Object itemObj) {
-        if (itemObj == null) return 0;
-        try {
-            Class<?> bwClass = itemObj.getClass();
-            Field levelField;
-            try {
-                levelField = bwClass.getDeclaredField("z");
-            } catch (NoSuchFieldException nfe) {
-                levelField = bwClass.getSuperclass().getDeclaredField("z");
-            }
-            levelField.setAccessible(true);
-            return levelField.getByte(itemObj) & 0xFF;
-        } catch (Throwable t) {
-            System.err.println("[AutoUpgrade] getItemLevel error: " + t.getMessage());
-            return 0;
-        }
-    }
-
-    private static String getItemName(Object itemObj) {
-        if (itemObj == null) return "";
-        try {
-            Class<?> bwClass = itemObj.getClass();
-            Field nameField;
-            try {
-                nameField = bwClass.getDeclaredField("g");
-            } catch (NoSuchFieldException nfe) {
-                nameField = bwClass.getSuperclass().getDeclaredField("g");
-            }
-            nameField.setAccessible(true);
-            String name = (String) nameField.get(itemObj);
-            return name != null ? name : "";
-        } catch (Throwable t) {
-            return "";
-        }
-    }
-
-    private static int getItemId(Object itemObj) {
-        if (itemObj == null) return 0;
-        try {
-            Class<?> bwClass = itemObj.getClass();
-            Field idField;
-            try {
-                idField = bwClass.getDeclaredField("O");
-            } catch (NoSuchFieldException nfe) {
-                idField = bwClass.getSuperclass().getDeclaredField("O");
-            }
-            idField.setAccessible(true);
-            return idField.getInt(itemObj);
-        } catch (Throwable t) {
-            return 0;
-        }
-    }
-
-    private static int getItemType(Object itemObj) {
-        if (itemObj == null) return 0;
-        try {
-            Class<?> bwClass = itemObj.getClass();
-            Field typeField;
-            try {
-                typeField = bwClass.getDeclaredField("u");
-            } catch (NoSuchFieldException nfe) {
-                typeField = bwClass.getSuperclass().getDeclaredField("u");
-            }
-            typeField.setAccessible(true);
-            return typeField.getInt(itemObj);
-        } catch (Throwable t) {
-            return 0;
-        }
-    }
-
     /**
-     * Dispatches packet q.a().b(b1, s2, b3)
+     * Dispatches packet: Rebuild_Item(b1, s2, b3) or b(b1, s2, b3)
      */
     private static void sendPacketB(byte b1, short s2, byte b3) {
         try {
-            ClassLoader cl = getGameClassLoader();
-            Class<?> qClass = cl.loadClass("q");
-            Method getInstanceMethod = qClass.getDeclaredMethod("a");
-            getInstanceMethod.setAccessible(true);
-            Object qInstance = getInstanceMethod.invoke(null);
-            if (qInstance == null) {
-                System.err.println("[AutoUpgrade] q.a() returned null! Network service unavailable.");
+            Class<?> srvClass = getServiceClass();
+            if (srvClass == null) {
+                System.err.println("[AutoUpgrade] Service class not found! Network service unavailable.");
+                return;
+            }
+            Method getInstanceMethod = findMethod(srvClass, new String[]{"gI", "a"});
+            if (getInstanceMethod == null) {
+                System.err.println("[AutoUpgrade] Service getInstance method not found!");
+                return;
+            }
+            Object srvInstance = getInstanceMethod.invoke(null);
+            if (srvInstance == null) {
+                System.err.println("[AutoUpgrade] Service instance is null! Network service unavailable.");
                 return;
             }
 
-            Method bMethod = qClass.getDeclaredMethod("b", byte.class, short.class, byte.class);
-            bMethod.setAccessible(true);
-            bMethod.invoke(qInstance, b1, s2, b3);
+            Method bMethod = findMethod(srvClass, new String[]{"Rebuild_Item", "b"}, byte.class, short.class, byte.class);
+            if (bMethod == null) {
+                System.err.println("[AutoUpgrade] Rebuild_Item packet method not found!");
+                return;
+            }
+            bMethod.invoke(srvInstance, b1, s2, b3);
         } catch (Throwable t) {
             System.err.println("[AutoUpgrade] Error sending packet b(" + b1 + ", " + s2 + ", " + b3 + "): " + t.getMessage());
             t.printStackTrace();
@@ -530,6 +664,12 @@ public class AutoUpgrade {
         if (isUpgrading) {
             stopUpgrade();
         }
+
+        // When switching equipment or starting fresh, reset clover slot immediately
+        if (activeItemId != itemId || lastUpgradedItemId != itemId) {
+            resetCloverSlot();
+        }
+        lastUpgradedItemId = itemId;
 
         activeItemId = itemId;
         activeItemType = itemType;
@@ -575,12 +715,15 @@ public class AutoUpgrade {
                         if (activeCurrentLevel >= activeTargetLevel) {
                             lastStatusMessage = "Chuc mung! Da dat +" + activeCurrentLevel + "!";
                             isUpgrading = false;
+                            resetCloverSlot();
                             break;
                         }
 
                         // Determine lucky clover requirement
-                        boolean needClover4 = (activeCurrentLevel >= clover4MinLevel && activeCurrentLevel <= clover4MaxLevel);
-                        boolean needClover3 = (activeCurrentLevel >= clover3MinLevel && activeCurrentLevel <= clover3MaxLevel);
+                        boolean needClover4 = (clover4MinLevel > 0 && clover4MaxLevel >= clover4MinLevel &&
+                                               activeCurrentLevel >= clover4MinLevel && activeCurrentLevel <= clover4MaxLevel);
+                        boolean needClover3 = (clover3MinLevel > 0 && clover3MaxLevel >= clover3MinLevel &&
+                                               activeCurrentLevel >= clover3MinLevel && activeCurrentLevel <= clover3MaxLevel);
 
                         Object cloverToAttach = null;
                         if (needClover4) {
@@ -588,6 +731,7 @@ public class AutoUpgrade {
                             if (cloverToAttach == null && stopWhenOutOfClover) {
                                 lastStatusMessage = "Het Co 4 la tai +" + activeCurrentLevel + "! Dung dap.";
                                 isUpgrading = false;
+                                resetCloverSlot();
                                 break;
                             }
                         } else if (needClover3) {
@@ -595,8 +739,12 @@ public class AutoUpgrade {
                             if (cloverToAttach == null && stopWhenOutOfClover) {
                                 lastStatusMessage = "Het Co 3 la tai +" + activeCurrentLevel + "! Dung dap.";
                                 isUpgrading = false;
+                                resetCloverSlot();
                                 break;
                             }
+                        } else {
+                            // Current level is outside clover config range: actively discard / remove clover!
+                            resetCloverSlot();
                         }
 
                         int prevLevel = activeCurrentLevel;
@@ -611,7 +759,7 @@ public class AutoUpgrade {
                         // Dismiss any open popup dialog before starting attempt
                         dismissPopupDialog();
 
-                        // Reset server response tracker fields in class c
+                        // Reset server response tracker
                         resetServerResponseState();
 
                         // Step 1: Put item into Blacksmith slot (Action 0)
@@ -623,14 +771,19 @@ public class AutoUpgrade {
                             int cloverId = getItemId(cloverToAttach);
                             int cloverType = getItemType(cloverToAttach);
                             sendPacketB((byte) 0, (short) cloverId, (byte) cloverType);
+                            lastAttachedCloverId = cloverId;
+                            lastAttachedCloverType = cloverType;
                             Thread.sleep(120);
+                        } else {
+                            lastAttachedCloverId = -1;
+                            lastAttachedCloverType = -1;
                         }
 
                         // Step 3: Select currency (Action 2: 0 = Vang/Xu)
                         sendPacketB((byte) 2, (short) 0, (byte) 0);
                         Thread.sleep(120);
 
-                        // Step 4: Dispatch Blacksmith Upgrade Packet: q.a().b(5, (short)itemId, (byte)itemType)
+                        // Step 4: Dispatch Blacksmith Upgrade Packet (Action 5)
                         sendPacketB((byte) 5, (short) activeItemId, (byte) activeItemType);
 
                         // Step 5: Wait for server response - poll level change and server message
@@ -666,6 +819,7 @@ public class AutoUpgrade {
                                 lastStatusMessage = serverMsg;
                                 System.out.println(ANSI_BOLD_YELLOW + "[AutoUpgrade] Stopped due to server condition: " + serverMsg + ANSI_RESET);
                                 isUpgrading = false;
+                                resetCloverSlot();
                                 break;
                             }
                         }
@@ -701,6 +855,7 @@ public class AutoUpgrade {
                             lastStatusMessage = "Chuc mung! Da dat +" + activeCurrentLevel + "!";
                             System.out.println(ANSI_BOLD_GREEN + "[AutoUpgrade] TARGET REACHED: +" + activeCurrentLevel + "! Congratulations!" + ANSI_RESET);
                             isUpgrading = false;
+                            resetCloverSlot();
                             break;
                         }
 
@@ -715,10 +870,12 @@ public class AutoUpgrade {
                         err.printStackTrace();
                         lastStatusMessage = "Loi nang cap: " + err.getMessage();
                         isUpgrading = false;
+                        resetCloverSlot();
                         break;
                     }
                 }
                 isUpgrading = false;
+                resetCloverSlot();
                 System.out.println(ANSI_CYAN + "[AutoUpgrade] Background upgrade worker stopped." + ANSI_RESET);
             }
         }, "AutoUpgrade-Worker");
@@ -737,6 +894,7 @@ public class AutoUpgrade {
                 upgradeThread.interrupt();
                 upgradeThread = null;
             }
+            resetCloverSlot();
             lastStatusMessage = "Da dung boi nguoi dung.";
             System.out.println("[AutoUpgrade] Upgrade halted by user.");
         }
@@ -752,36 +910,21 @@ public class AutoUpgrade {
 
         // Query current material counts
         try {
-            ClassLoader cl = getGameClassLoader();
-            Class<?> bwClass = cl.loadClass("bw");
-            Field vField = bwClass.getDeclaredField("V");
-            vField.setAccessible(true);
-            Object vObj = vField.get(null);
-
+            Object vObj = getInventoryVector();
             if (vObj != null) {
-                Class<?> etClass = cl.loadClass("et");
-                Method sizeMethod = etClass.getDeclaredMethod("c");
-                Method getMethod = etClass.getDeclaredMethod("a", int.class);
-                sizeMethod.setAccessible(true);
-                getMethod.setAccessible(true);
-
-                int size = ((Integer) sizeMethod.invoke(vObj)).intValue();
-                Field nameField = bwClass.getDeclaredField("g");
-                Field qtyField = bwClass.getDeclaredField("p");
-                nameField.setAccessible(true);
-                qtyField.setAccessible(true);
-
+                int size = getVectorSize(vObj);
                 for (int i = 0; i < size; i++) {
-                    Object item = getMethod.invoke(vObj, i);
+                    Object item = getVectorElementAt(vObj, i);
                     if (item == null) continue;
-                    String name = (String) nameField.get(item);
-                    int qty = qtyField.getInt(item);
-                    if (qty <= 0) qty = 1;
+                    String name = getItemName(item);
+                    int qty = getItemQuantity(item);
+                    int type = getItemType(item);
+                    int typeMat = getItemTypeMaterial(item);
 
-                    if (isClover3(name)) {
-                        clover3Count += qty;
-                    } else if (isClover4(name)) {
+                    if (isClover4(name)) {
                         clover4Count += qty;
+                    } else if (isClover3(name) || (type == 7 && typeMat == 11)) {
+                        clover3Count += qty;
                     } else if (isInsurance(name)) {
                         insuranceCount += qty;
                     }

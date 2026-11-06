@@ -9,9 +9,8 @@ const (
 )
 
 // ActionCommand is the HSO packet command written by KnightOnline_402.jar
-// method q.b(byte,short,byte). Task 5 overwrites this if the JAR scan
-// captures a different command byte; tests must use this identifier.
-var ActionCommand int8 = 34
+// method q.b(byte,short,byte) (opcode 67 / 0x43).
+var ActionCommand int8 = 67
 
 func BuildUpgradeAction(action byte, itemID int16, itemType int8) *protocol.Message {
 	msg := protocol.NewMessage(ActionCommand)

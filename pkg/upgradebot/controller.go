@@ -341,3 +341,71 @@ func stepDelay(ms int) time.Duration {
 	}
 	return time.Duration(ms) * time.Millisecond
 }
+
+// InventoryJSON returns JSON representing the current bag items from the snapshot.
+func (c *Controller) InventoryJSON() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c3 := 0
+	if it := c.snap.Clover3(); it != nil {
+		c3 = it.Quantity
+	}
+	c4 := 0
+	if it := c.snap.Clover4(); it != nil {
+		c4 = it.Quantity
+	}
+
+	type invItem struct {
+		ID       int16  `json:"id"`
+		Name     string `json:"name"`
+		Type     int8   `json:"type"`
+		Level    int8   `json:"level"`
+		Quantity int    `json:"quantity"`
+	}
+	items := make([]invItem, 0, len(c.snap.Items))
+	for _, it := range c.snap.Items {
+		if it != nil {
+			items = append(items, invItem{
+				ID:       it.ID,
+				Name:     it.Name,
+				Type:     it.Type,
+				Level:    it.Level,
+				Quantity: it.Quantity,
+			})
+		}
+	}
+
+	raw, err := json.Marshal(map[string]interface{}{
+		"gold":           c.snap.Gold,
+		"clover3Count":   c3,
+		"clover4Count":   c4,
+		"insuranceCount": 0,
+		"items":          items,
+	})
+	if err != nil {
+		return `{"gold":0,"clover3Count":0,"clover4Count":0,"insuranceCount":0,"items":[]}`
+	}
+	return string(raw)
+}
+
+// SyncSnapshot updates the internal snapshot with authoritative state (e.g. from VM memory).
+func (c *Controller) SyncSnapshot(inGame bool, gold int64, items []*Item) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.snap.InGame = inGame
+	if gold > 0 || c.snap.Gold == 0 {
+		c.snap.Gold = gold
+	}
+	if len(items) > 0 {
+		c.snap.Items = items
+	}
+}
+
+// GetSnapshot returns a copy of the current internal snapshot.
+func (c *Controller) GetSnapshot() Snapshot {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.snap
+}
+

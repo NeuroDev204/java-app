@@ -32,6 +32,12 @@ class MainActivity : FlutterActivity() {
             "go.gamebridge.Bridge",
             "go.Bridge",
         )
+
+        // Package-level Go funcs land on the generated package class, not Bridge.
+        private val GAMEBRIDGE_CLASS_NAMES = arrayOf(
+            "gamebridge.Gamebridge",
+            "go.gamebridge.Gamebridge",
+        )
     }
 
     // Background executor — keeps heavy VM calls off the main thread.
@@ -45,6 +51,7 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
 
         nativeBridge = tryLinkNativeBridge()
+        nativeSetDataDir()
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
             .setMethodCallHandler { call: MethodCall, result: MethodChannel.Result ->
@@ -201,6 +208,31 @@ class MainActivity : FlutterActivity() {
             }
         }
         return null
+    }
+
+    /**
+     * Hand the engine a writable directory for the MIDP record store. Without it
+     * record stores are memory-only, so every item icon the game downloads is
+     * lost on exit and has to be fetched again on the next launch, leaving
+     * inventory slots stuck on the loading spinner.
+     *
+     * SetDataDir is a package-level Go function, so gomobile emits it as a static
+     * on the generated Gamebridge class rather than on the Bridge instance.
+     */
+    private fun nativeSetDataDir() {
+        val dir = filesDir?.absolutePath ?: return
+        for (name in GAMEBRIDGE_CLASS_NAMES) {
+            try {
+                Class.forName(name)
+                    .getMethod("setDataDir", String::class.java)
+                    .invoke(null, dir)
+                Log.i(TAG, "record store directory set to $dir")
+                return
+            } catch (e: Throwable) {
+                Log.i(TAG, "setDataDir via $name unavailable: ${e.message}")
+            }
+        }
+        Log.w(TAG, "setDataDir not found; record stores will not persist")
     }
 
     private fun nativeLoadJAR(jarBytes: ByteArray): String {

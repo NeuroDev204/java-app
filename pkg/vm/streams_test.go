@@ -315,3 +315,51 @@ func TestPrintStreamLogging(t *testing.T) {
 	}
 }
 
+
+// aq.c wraps getResourceAsStream's null in a DataInputStream and relies on the
+// NPE from available() to fall back to the server icon download.
+func TestDataInputStreamOverNullThrowsNPE(t *testing.T) {
+	ctx := NewVMContext(nil, nil)
+	dis := &Object{}
+	frame := &Frame{OperandStack: NewOperandStack(8)}
+	frame.OperandStack.PushRef(dis)
+	frame.OperandStack.PushRef(nil)
+	ctx.handleNativeCall("java/io/DataInputStream", "<init>", "(Ljava/io/InputStream;)V", frame, OpInvokespecial)
+	if frame.PendingException != nil {
+		t.Fatal("constructor must not throw")
+	}
+	frame.OperandStack.PushRef(dis)
+	ctx.handleNativeCall("java/io/DataInputStream", "available", "()I", frame, OpInvokevirtual)
+	if frame.PendingException == nil {
+		t.Fatal("available() on a null stream must throw NullPointerException")
+	}
+	if frame.OperandStack.size != 0 {
+		t.Fatalf("operand stack not cleaned, size=%d", frame.OperandStack.size)
+	}
+}
+
+// Bag equipment rows build new j(..., Long.parseLong(expiry)); a 1-slot result
+// shifts every constructor argument and the items never render.
+func TestLongParseLongPushesTwoSlots(t *testing.T) {
+	ctx := NewVMContext(nil, nil)
+	frame := &Frame{OperandStack: NewOperandStack(8)}
+	frame.OperandStack.PushRef("-1")
+	ctx.handleNativeCall("java/lang/Long", "parseLong", "(Ljava/lang/String;)J", frame, OpInvokestatic)
+	if frame.OperandStack.size != 2 {
+		t.Fatalf("long result must take 2 slots, got %d", frame.OperandStack.size)
+	}
+	lo := uint32(frame.OperandStack.PopInt())
+	hi := uint32(frame.OperandStack.PopInt())
+	if v := int64(uint64(hi)<<32 | uint64(lo)); v != -1 {
+		t.Fatalf("parseLong(\"-1\") = %d", v)
+	}
+}
+
+func TestUnknownNativeLongReturnPushesTwoSlots(t *testing.T) {
+	ctx := NewVMContext(nil, nil)
+	frame := &Frame{OperandStack: NewOperandStack(8)}
+	ctx.handleNativeCall("java/lang/Nope", "nope", "()J", frame, OpInvokestatic)
+	if frame.OperandStack.size != 2 {
+		t.Fatalf("fallback long result must take 2 slots, got %d", frame.OperandStack.size)
+	}
+}

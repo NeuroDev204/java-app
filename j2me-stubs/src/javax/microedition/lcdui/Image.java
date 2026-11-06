@@ -49,8 +49,37 @@ public class Image {
         return nativeId;
     }
 
+    public static InputStream getResource(String path) {
+        if (path == null) return null;
+        String cleanPath = path.startsWith("/") ? path.substring(1) : path;
+        String slashPath = "/" + cleanPath;
+        InputStream is = null;
+        if (com.emulator.Main.j2meClassLoader != null) {
+            is = com.emulator.Main.j2meClassLoader.getResourceAsStream(cleanPath);
+            if (is == null) {
+                is = com.emulator.Main.j2meClassLoader.getResourceAsStream(slashPath);
+            }
+        }
+        if (is == null) {
+            ClassLoader ccl = Thread.currentThread().getContextClassLoader();
+            if (ccl != null) {
+                is = ccl.getResourceAsStream(cleanPath);
+                if (is == null) {
+                    is = ccl.getResourceAsStream(slashPath);
+                }
+            }
+        }
+        if (is == null) {
+            is = Image.class.getResourceAsStream(slashPath);
+        }
+        if (is == null) {
+            is = Image.class.getResourceAsStream(cleanPath);
+        }
+        return is;
+    }
+
     public static Image createImage(String path) throws IOException {
-        InputStream is = Image.class.getResourceAsStream(path);
+        InputStream is = getResource(path);
         if (is == null) {
             throw new IOException("Resource not found: " + path);
         }

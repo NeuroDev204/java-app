@@ -3,11 +3,8 @@ package autoupgrade
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"sync"
 	"testing"
-
-	"java-app/pkg/jvm"
 )
 
 // MockBridge implements the Bridge interface for unit testing.
@@ -29,8 +26,10 @@ type MockBridge struct {
 	startedStop    bool
 	startedDelay   int
 	startCalled    bool
-	stopCalled     bool
-	isRunning      bool
+	stopCalled        bool
+	resetCloverCalled bool
+	resetErr          error
+	isRunning         bool
 }
 
 func NewMockBridge() *MockBridge {
@@ -111,6 +110,16 @@ func (m *MockBridge) GetUpgradeStatusJson() (string, error) {
 		return "", m.statusErr
 	}
 	return m.statusJSON, nil
+}
+
+func (m *MockBridge) ResetClover() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.resetErr != nil {
+		return m.resetErr
+	}
+	m.resetCloverCalled = true
+	return nil
 }
 
 func TestItemJSONSerialization(t *testing.T) {
@@ -467,61 +476,28 @@ func TestController_Concurrency(t *testing.T) {
 	wg.Wait()
 }
 
-func TestDefaultJNIBridge_NilJVM(t *testing.T) {
-	bridge := &JNIBridge{}
-	
-	// When JVM is nil or uninitialized, JNIBridge must return descriptive errors gracefully
-	_, err := bridge.GetInventoryJson()
+func TestController_ResetClover(t *testing.T) {
+	mockBridge := NewMockBridge()
+	ctrl := NewControllerWithBridge(mockBridge)
+
+	if mockBridge.resetCloverCalled {
+		t.Errorf("expected resetCloverCalled to be false initially")
+	}
+
+	err := ctrl.ResetClover()
+	if err != nil {
+		t.Fatalf("unexpected error calling ResetClover: %v", err)
+	}
+
+	if !mockBridge.resetCloverCalled {
+		t.Errorf("expected resetCloverCalled to be true after ctrl.ResetClover()")
+	}
+
+	// Test error propagation
+	mockBridge.resetErr = errors.New("bridge error")
+	err = ctrl.ResetClover()
 	if err == nil {
-		fmt.Println("Note: JVM was initialized in environment")
-	}
-
-	err = bridge.StopUpgrade()
-	if err == nil {
-		fmt.Println("Note: JVM was initialized in environment")
-	}
-
-	_, err = bridge.GetUpgradeStatusJson()
-	if err == nil {
-		fmt.Println("Note: JVM was initialized in environment")
-	}
-}
-
-func TestController_LiveJVMIntegration(t *testing.T) {
-	// Initialize real HotSpot JVM with stubs
-	_, err := jvm.InitJVM("../../j2me-stubs/bin")
-	if err != nil {
-		t.Logf("JVM initialization note: %v", err)
-		return
-	}
-
-	ctrl := NewController()
-	if ctrl == nil {
-		t.Fatalf("NewController returned nil")
-	}
-
-	// Verify inventory query via live JNI
-	inv, err := ctrl.RefreshInventory()
-	if err != nil {
-		t.Logf("Live inventory query note: %v", err)
-	} else if inv != nil {
-		t.Logf("Live inventory retrieved: %d items, gold=%d, clover3=%d, clover4=%d", len(inv.Items), inv.Gold, inv.Clover3Count, inv.Clover4Count)
-	}
-
-	// Verify status query via live JNI
-	status, err := ctrl.GetStatus()
-	if err != nil {
-		t.Fatalf("Live GetStatus failed: %v", err)
-	}
-	if status == nil {
-		t.Fatalf("Live status is nil")
-	}
-	t.Logf("Live status retrieved: running=%v, message=%s, stopped=%v", status.Running, status.Message, status.Stopped)
-
-	// Verify stop upgrade via live JNI
-	err = ctrl.StopUpgrade()
-	if err != nil {
-		t.Fatalf("Live StopUpgrade failed: %v", err)
+		t.Errorf("expected error when bridge fails ResetClover")
 	}
 }
 

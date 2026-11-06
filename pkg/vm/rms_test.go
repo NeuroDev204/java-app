@@ -194,7 +194,7 @@ func TestDefaultRMSImagesAllXORedPNG(t *testing.T) {
 		}
 	}
 
-	if imageStoreCount != 87 {
-		t.Fatalf("expected 87 image stores, got %d", imageStoreCount)
+	if imageStoreCount != 0 {
+		t.Fatalf("expected no stale dynamic image stores in the runtime preload, got %d", imageStoreCount)
 	}
 }

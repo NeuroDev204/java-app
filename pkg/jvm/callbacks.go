@@ -156,34 +156,40 @@ func GetActiveGraphics() *midp.Graphics {
 // Forward key press/release event to current active Java Canvas
 func DispatchKeyEvent(keyCode int, pressed bool) {
 	canvasMutex.Lock()
-	defer canvasMutex.Unlock()
-	if unsafe.Pointer(currentCanvasRef) == nil || globalJVM == nil {
+	ref := currentCanvasRef
+	canvasMutex.Unlock()
+
+	if unsafe.Pointer(ref) == nil || globalJVM == nil {
 		return
 	}
 	bPressed := C.jboolean(C.JNI_FALSE)
 	if pressed {
 		bPressed = C.jboolean(C.JNI_TRUE)
 	}
-	C.c_dispatch_key_event(globalJVM.vm, globalJVM.env, currentCanvasRef, C.jint(keyCode), bPressed)
+	C.c_dispatch_key_event(globalJVM.vm, globalJVM.env, ref, C.jint(keyCode), bPressed)
 }
 
 func DispatchKeyRepeated(keyCode int) {
 	canvasMutex.Lock()
-	defer canvasMutex.Unlock()
-	if unsafe.Pointer(currentCanvasRef) == nil || globalJVM == nil {
+	ref := currentCanvasRef
+	canvasMutex.Unlock()
+
+	if unsafe.Pointer(ref) == nil || globalJVM == nil {
 		return
 	}
-	C.c_dispatch_key_repeated(globalJVM.vm, globalJVM.env, currentCanvasRef, C.jint(keyCode))
+	C.c_dispatch_key_repeated(globalJVM.vm, globalJVM.env, ref, C.jint(keyCode))
 }
 
 // Forward pointer event to current active Java Canvas
 func DispatchPointerEvent(x, y int, eventType int) {
 	canvasMutex.Lock()
-	defer canvasMutex.Unlock()
-	if unsafe.Pointer(currentCanvasRef) == nil || globalJVM == nil {
+	ref := currentCanvasRef
+	canvasMutex.Unlock()
+
+	if unsafe.Pointer(ref) == nil || globalJVM == nil {
 		return
 	}
-	C.c_dispatch_pointer_event(globalJVM.vm, globalJVM.env, currentCanvasRef, C.jint(x), C.jint(y), C.jint(eventType))
+	C.c_dispatch_pointer_event(globalJVM.vm, globalJVM.env, ref, C.jint(x), C.jint(y), C.jint(eventType))
 }
 
 // --- JNI Callbacks ---

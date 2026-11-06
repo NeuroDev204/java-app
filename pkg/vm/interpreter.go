@@ -23,21 +23,130 @@ type RecordStoreData struct {
 	Records [][]byte
 }
 
+// storeDownloadedIcon mirrors the JAR's di -> bk.a path for a server-sent
+// image. bk.a passes the PNG through TemMidlet's XOR RMS codec before writing
+// the canonical "image<ID>" store. The raw dlicon copy is for the native
+// resLocal adapter, which decodes PNG bytes directly rather than through the
+// JAR's RMS codec.
+func (ctx *VMContext) storeDownloadedIcon(id int32, png []byte) {
+	canonicalName := "image" + strconv.Itoa(int(id))
+	directName := "dlicon" + strconv.Itoa(int(id))
+	encoded := make([]byte, len(png))
+	for i, b := range png {
+		encoded[i] = b ^ 0xFF
+	}
+	ctx.mu.Lock()
+	if ctx.RecordStores == nil {
+		ctx.RecordStores = make(map[string]*RecordStoreData)
+	}
+	canonicalSame := false
+	if rs := ctx.RecordStores[canonicalName]; rs != nil && len(rs.Records) == 1 {
+		canonicalSame = bytes.Equal(rs.Records[0], encoded)
+	}
+	directSame := false
+	if rs := ctx.RecordStores[directName]; rs != nil && len(rs.Records) == 1 {
+		directSame = bytes.Equal(rs.Records[0], png)
+	}
+	if canonicalSame && directSame {
+		ctx.mu.Unlock() // already stored, avoid rewriting rms.json every frame
+		return
+	}
+	ctx.RecordStores[canonicalName] = &RecordStoreData{Records: [][]byte{encoded}}
+	ctx.RecordStores[directName] = &RecordStoreData{Records: [][]byte{append([]byte(nil), png...)}}
+	ctx.mu.Unlock()
+	ctx.saveRMS()
+}
+
+// loadDownloadedIcon returns a raw PNG captured for a resLocal icon. The JAR
+// itself reads the encoded image<ID> store, while this adapter reads dlicon<ID>
+// directly.
+func (ctx *VMContext) loadDownloadedIcon(id int32) []byte {
+	ctx.mu.RLock()
+	defer ctx.mu.RUnlock()
+	name := "dlicon" + strconv.Itoa(int(id))
+	if rs := ctx.RecordStores[name]; rs != nil && len(rs.Records) == 1 {
+		return rs.Records[0]
+	}
+	return nil
+}
+
+// resLocalIconID maps a /resLocal/... createImage path to the download id the
+// game requests for it. The offsets are the ids passed by bk.o after each
+// resource getter fails to find the corresponding file in the JAR. Keeping
+// this table in one place is important because these paths are also used by
+// the inventory and equipment screens for server-provided assets.
+func resLocalIconID(path string) (int32, bool) {
+	i := strings.Index(path, "resLocal/")
+	if i < 0 {
+		return 0, false
+	}
+	sub := strings.TrimSuffix(path[i:], ".png")
+	numAfter := func(prefix string) (int32, bool) {
+		if !strings.HasPrefix(sub, prefix) {
+			return 0, false
+		}
+		n, err := strconv.Atoi(sub[len(prefix):])
+		if err != nil {
+			return 0, false
+		}
+		return int32(n), true
+	}
+	if n, ok := numAfter("resLocal/npc/icon/"); ok {
+		return n + 500 + 3000, true
+	}
+	if n, ok := numAfter("resLocal/npc/"); ok {
+		return n + 3000, true
+	}
+	if n, ok := numAfter("resLocal/tree/"); ok {
+		return n, true
+	}
+	if n, ok := numAfter("resLocal/mons/"); ok {
+		return n + 1000, true
+	}
+	if n, ok := numAfter("resLocal/icon/icon_"); ok {
+		return n + 2000, true
+	}
+	if n, ok := numAfter("resLocal/iconq/"); ok {
+		return n + 5000, true
+	}
+	if n, ok := numAfter("resLocal/potion/potionIcon_"); ok {
+		return n - 1 + 4000, true
+	}
+	if n, ok := numAfter("resLocal/material/"); ok {
+		return n + 5500, true
+	}
+	if n, ok := numAfter("resLocal/skill/iconSkill_"); ok {
+		return n + 6000, true
+	}
+	if n, ok := numAfter("resLocal/iconclan/shop/"); ok {
+		return n + 500 + 7000, true
+	}
+	if n, ok := numAfter("resLocal/iconclan/huyhieu/"); ok {
+		return n + 9500, true
+	}
+	if n, ok := numAfter("resLocal/iconclan/"); ok {
+		return n + 7000, true
+	}
+	if n, ok := numAfter("resLocal/pet/icon/icon_pet_"); ok {
+		return n + 10000, true
+	}
+	if n, ok := numAfter("resLocal/pet/"); ok {
+		return n + 10200, true
+	}
+	return 0, false
+}
+
 type VMContext struct {
-	ClassLoader            *classfile.ClassLoader
-	StaticFields           map[string]Slot
-	Graphics               *midp.Graphics
-	CurrentCanvas          *Object
-	PendingTextBox         *Object
-	InitializedClasses     map[string]bool
-	RecordStores           map[string]*RecordStoreData
-	ActiveSocket           *midp.SocketTap
-	RepaintPending         bool
-	debugAppearanceSynced  bool
-	debugAppearanceWrites  int
-	debugPlayerSpriteCalls int
-	debugLayerSelections   int
-	mu                     sync.RWMutex
+	ClassLoader        *classfile.ClassLoader
+	StaticFields       map[string]Slot
+	Graphics           *midp.Graphics
+	CurrentCanvas      *Object
+	PendingTextBox     *Object
+	InitializedClasses map[string]bool
+	RecordStores       map[string]*RecordStoreData
+	ActiveSocket       *midp.SocketTap
+	RepaintPending     bool
+	mu                 sync.RWMutex
 	// execMu serializes top-level interpretation so Thread.start goroutines
 	// cannot interleave with startApp/paint and leave game statics half-init.
 	execMu sync.Mutex
@@ -191,9 +300,7 @@ func (ctx *VMContext) SyncPlayerAppearance() {
 		bmBZ := targetBM.GetField("bZ")
 		bmCA := targetBM.GetField("ca")
 		bmBX := targetBM.GetField("bX")
-		bmCD := targetBM.GetField("cd")
 		bmCE := targetBM.GetField("ce")
-		bmDY := targetBM.GetField("dY")
 
 		if bmBZ.Num > 0 {
 			activePlayer.SetField("bZ", bmBZ)
@@ -204,15 +311,17 @@ func (ctx *VMContext) SyncPlayerAppearance() {
 		if bmBX.Num > 0 {
 			activePlayer.SetField("bX", bmBX)
 		}
-		if bmCD.Num > 0 {
-			activePlayer.SetField("cd", bmCD)
-		}
 		if bmCE.Num > 0 {
 			activePlayer.SetField("ce", bmCE)
 		}
-		if bmDY.Num > 0 {
-			activePlayer.SetField("dY", bmDY)
-		}
+		// Wings (cd) and weapon (dY) are deliberately NOT copied from the
+		// character-select entry. Those ids only address sprites in the select
+		// screen's own numbering: carrying them in-game asks the game for files
+		// the JAR does not contain (e.g. cd=21 -> /x1/c/wing/b21_wing.png, which
+		// only exists for multiples of 4, and dY=18 -> /x1/weapon/phapsu/18.png,
+		// which only goes up to 17). createImage then throws and the layer draws
+		// nothing, which is why equipment rendered fully transparent. The in-game
+		// appearance packet owns these two fields.
 
 		bmBY := targetBM.GetField("bY")
 		bmCC := targetBM.GetField("cc")
@@ -242,10 +351,8 @@ func (ctx *VMContext) SyncPlayerAppearance() {
 		if bmCP.Ref != nil && activePlayer.GetField("cP").Ref == nil {
 			activePlayer.SetField("cP", bmCP)
 		}
-		log.Printf("[SYNC-PLAYER] Synchronized player '%s' (ID %d) appearance from character select: bZ=%d, ca=%d, bX=%d, cd=%d, dY=%d, cc=%d",
-			charName, charID, activePlayer.GetField("bZ").Num, activePlayer.GetField("ca").Num, activePlayer.GetField("bX").Num, activePlayer.GetField("cd").Num, activePlayer.GetField("dY").Num, activePlayer.GetField("cc").Num)
-		ctx.debugAppearanceSynced = true
-		log.Printf("[DEBUG-APPEARANCE-SYNC] cn.g=%p active=%p name=%q id=%d", cnG, activePlayer, charName, charID)
+		log.Printf("[SYNC-PLAYER] Synchronized player '%s' (ID %d) appearance from character select: bZ=%d, ca=%d, bX=%d, cc=%d",
+			charName, charID, activePlayer.GetField("bZ").Num, activePlayer.GetField("ca").Num, activePlayer.GetField("bX").Num, activePlayer.GetField("cc").Num)
 	}
 }
 
@@ -284,6 +391,26 @@ type DataStreamReader struct {
 	Data []byte
 	Pos  int
 }
+
+// nullInputStream marks a stream wrapping null (e.g. getResourceAsStream miss).
+// Like the JDK, any use of it throws NullPointerException; aq.c relies on that
+// to return null so bk requests the icon from the server (-51).
+type nullInputStream struct{}
+
+// wideLo carries the low word of a long returned by lreturn; Slot.Num holds the high word.
+type wideLo int32
+
+func popLong(frame *Frame) int64 {
+	lo := uint32(frame.OperandStack.PopInt())
+	hi := uint32(frame.OperandStack.PopInt())
+	return int64(uint64(hi)<<32 | uint64(lo))
+}
+
+func pushLong(frame *Frame, v int64) {
+	frame.OperandStack.PushInt(int32(v >> 32))
+	frame.OperandStack.PushInt(int32(v))
+}
+
 
 func (r *DataStreamReader) Available() int32 {
 	rem := len(r.Data) - r.Pos
@@ -467,30 +594,6 @@ func (ctx *VMContext) resolveVirtualMethod(recv interface{}, mName, mDesc string
 // ResolveVirtualMethod exposes virtual method lookup for bridge dispatch.
 func (ctx *VMContext) ResolveVirtualMethod(recv interface{}, mName, mDesc string) (*classfile.ClassFile, *classfile.MethodInfo) {
 	return ctx.resolveVirtualMethod(recv, mName, mDesc)
-}
-
-// adjustKnightOnlinePotionFallback keeps the JAR's local potion numbering and
-// its image-record numbering aligned. The local path starts at potionIcon_01,
-// while the bundled image records start at image4001; only bk.e -> bk.o is
-// adjusted so item, NPC, monster, and other icon fallbacks remain unchanged.
-func adjustKnightOnlinePotionFallback(
-	callerClassName string,
-	callerMethodName string,
-	targetClassName string,
-	targetMethodName string,
-	targetDescriptor string,
-	parameterSlots []Slot,
-) {
-	if callerClassName != "bk" || callerMethodName != "e" {
-		return
-	}
-	if targetClassName != "bk" || targetMethodName != "o" || targetDescriptor != "(S)Laq;" {
-		return
-	}
-	if len(parameterSlots) == 0 || parameterSlots[0].Num < 4000 {
-		return
-	}
-	parameterSlots[0].Num++
 }
 
 func (ctx *VMContext) InvokeMethod(cf *classfile.ClassFile, method *classfile.MethodInfo, args []Slot) (res Slot, err error) {
@@ -750,14 +853,27 @@ func (ctx *VMContext) ExecuteBytecode(cf *classfile.ClassFile, cfFrame codeWithF
 		case OpSaload:
 			idx := frame.OperandStack.PopInt()
 			arrRef := frame.OperandStack.PopRef()
+			// short[] backing may be []int16 (the faithful newarray-short type) but
+			// some paths hand this array over as []int32 or []Slot; saload must read
+			// them all, or it silently returns 0 and callers like fa.p treat a real
+			// equipment id as "empty" — leaving body/hat layers invisible. Mirror the
+			// permissiveness of iaload/aaload.
 			if shorts, ok := arrRef.([]int16); ok && idx >= 0 && int(idx) < len(shorts) {
 				frame.OperandStack.PushInt(int32(shorts[idx]))
+			} else if ints, ok := arrRef.([]int32); ok && idx >= 0 && int(idx) < len(ints) {
+				frame.OperandStack.PushInt(ints[idx])
+			} else if slots, ok := arrRef.([]Slot); ok && idx >= 0 && int(idx) < len(slots) {
+				frame.OperandStack.PushInt(slots[idx].Num)
 			} else if b, ok := arrRef.([]byte); ok && idx >= 0 && int(idx)*2+1 < len(b) {
 				val := int16(binary.BigEndian.Uint16(b[idx*2:]))
 				frame.OperandStack.PushInt(int32(val))
 			} else if obj, ok := arrRef.(*Object); ok && obj != nil {
 				if shorts, ok := obj.Extra.([]int16); ok && idx >= 0 && int(idx) < len(shorts) {
 					frame.OperandStack.PushInt(int32(shorts[idx]))
+				} else if ints, ok := obj.Extra.([]int32); ok && idx >= 0 && int(idx) < len(ints) {
+					frame.OperandStack.PushInt(ints[idx])
+				} else if slots, ok := obj.Extra.([]Slot); ok && idx >= 0 && int(idx) < len(slots) {
+					frame.OperandStack.PushInt(slots[idx].Num)
 				} else {
 					frame.OperandStack.PushInt(0)
 				}
@@ -1246,7 +1362,35 @@ func (ctx *VMContext) ExecuteBytecode(cf *classfile.ClassFile, cfFrame codeWithF
 		case OpI2s:
 			val := frame.OperandStack.PopInt()
 			frame.OperandStack.PushInt(int32(int16(val)))
-		case OpI2l, OpL2i, OpI2f, OpI2d, OpF2i, OpD2i:
+		case OpLconst0, OpLconst1:
+			frame.OperandStack.PushInt(0)
+			frame.OperandStack.PushInt(int32(opcode - OpLconst0))
+		case OpI2l:
+			pushLong(frame, int64(frame.OperandStack.PopInt()))
+		case OpL2i:
+			frame.OperandStack.PushInt(int32(popLong(frame)))
+		case OpLmul:
+			v2, v1 := popLong(frame), popLong(frame)
+			pushLong(frame, v1*v2)
+		case OpLdiv, OpLrem:
+			v2, v1 := popLong(frame), popLong(frame)
+			if v2 == 0 {
+				frame.PendingException = ctx.NewException("java/lang/ArithmeticException", "/ by zero")
+			} else if opcode == OpLdiv {
+				pushLong(frame, v1/v2)
+			} else {
+				pushLong(frame, v1%v2)
+			}
+		case OpDupX1:
+			v1 := frame.OperandStack.PopSlot()
+			v2 := frame.OperandStack.PopSlot()
+			frame.OperandStack.PushSlot(v1)
+			frame.OperandStack.PushSlot(v2)
+			frame.OperandStack.PushSlot(v1)
+		case OpLreturn:
+			lo := frame.OperandStack.PopInt()
+			return Slot{Num: frame.OperandStack.PopInt(), Ref: wideLo(lo)}, nil
+		case OpI2f, OpI2d, OpF2i, OpD2i:
 			// Type conversion stubs
 		case OpLookupswitch:
 			startPC := frame.PC - 1
@@ -1303,13 +1447,6 @@ func (ctx *VMContext) ExecuteBytecode(cf *classfile.ClassFile, cfFrame codeWithF
 			}
 			return Slot{}, nil
 		case OpIreturn:
-			if ctx.debugAppearanceSynced && ctx.debugLayerSelections < 80 && cf != nil && cf.GetClassName() == "fa" && cfFrame.method != nil && cf.ConstantPool.GetUtf8(cfFrame.method.NameIndex) == "p" {
-				cnG, _ := ctx.GetStaticField("cn.g").Ref.(*Object)
-				if frame.LocalVars.GetRef(0) == cnG && frame.OperandStack.size > 0 {
-					ctx.debugLayerSelections++
-					log.Printf("[DEBUG-LAYER-SELECT] index=%d result=%d dG=%v", frame.LocalVars.GetInt(1), frame.OperandStack.slots[frame.OperandStack.size-1].Num, cnG.GetField("dG").Ref)
-				}
-			}
 			return Slot{Num: frame.OperandStack.PopInt()}, nil
 		case OpAreturn:
 			return Slot{Ref: frame.OperandStack.PopRef()}, nil
@@ -1513,20 +1650,6 @@ func (ctx *VMContext) ExecuteBytecode(cf *classfile.ClassFile, cfFrame codeWithF
 						valSlot := frame.OperandStack.PopSlot()
 						objRef := frame.OperandStack.PopRef()
 						if obj, ok := objRef.(*Object); ok && obj != nil {
-							if ctx.debugAppearanceSynced && ctx.debugAppearanceWrites < 100 &&
-								(fName == "bZ" || fName == "ca" || fName == "bX" || fName == "cd" || fName == "ce" || fName == "dY" || fName == "bY" || fName == "cb" || fName == "cc") {
-								name := extractString(obj.GetField("cC").Ref)
-								cnG, _ := ctx.GetStaticField("cn.g").Ref.(*Object)
-								if obj == cnG || strings.EqualFold(name, "vjncible") {
-									callerMethod := ""
-									if cfFrame.method != nil {
-										callerMethod = cf.ConstantPool.GetUtf8(cfFrame.method.NameIndex)
-									}
-									ctx.debugAppearanceWrites++
-									log.Printf("[DEBUG-APPEARANCE-WRITE] caller=%s.%s object=%p is-cn.g=%t name=%q field=%s old=%d new=%d",
-										cf.GetClassName(), callerMethod, obj, obj == cnG, name, fName, obj.GetField(fName).Num, valSlot.Num)
-								}
-							}
 							obj.SetField(fName, valSlot)
 						}
 					}
@@ -1543,6 +1666,21 @@ func (ctx *VMContext) ExecuteBytecode(cf *classfile.ClassFile, cfFrame codeWithF
 				clsName := cf.ConstantPool.GetClassName(member.ClassIndex)
 				mName, mDesc := cf.ConstantPool.GetNameAndType(member.NameAndTypeIndex)
 
+				// Capture server icon replies (opcode -51). Every incoming message
+				// is built as new ep(opcode, payload); for -51 the payload is
+				// [id:2][png:rest]. Cache id->png so createImage can serve resLocal
+				// icons the JAR does not contain.
+				if clsName == "ep" && mName == "<init>" && mDesc == "(B[B)V" && frame.OperandStack.size >= 3 {
+					op := frame.OperandStack.slots[frame.OperandStack.size-2].Num
+					if op == -51 || op&0xFF == 0xCD {
+						if payload := extractBytes(frame.OperandStack.slots[frame.OperandStack.size-1].Ref); len(payload) > 2 {
+							id := int32(int16(uint16(payload[0])<<8 | uint16(payload[1])))
+							png := make([]byte, len(payload)-2)
+							copy(png, payload[2:])
+							ctx.storeDownloadedIcon(id, png)
+						}
+					}
+				}
 				if clsName == "javax/microedition/lcdui/Graphics" || isGraphicsMethodName(mName) {
 					ctx.handleNativeCall("javax/microedition/lcdui/Graphics", mName, mDesc, frame, opcode)
 				} else if strings.HasPrefix(clsName, "javax/microedition/") || strings.HasPrefix(clsName, "java/") {
@@ -1577,27 +1715,6 @@ func (ctx *VMContext) ExecuteBytecode(cf *classfile.ClassFile, cfFrame codeWithF
 							if opcode != OpInvokestatic {
 								receiver = frame.OperandStack.PopSlot()
 							}
-							callerMethodName := ""
-							if cfFrame.method != nil {
-								callerMethodName = cf.ConstantPool.GetUtf8(cfFrame.method.NameIndex)
-							}
-							adjustKnightOnlinePotionFallback(
-								cf.GetClassName(),
-								callerMethodName,
-								clsName,
-								mName,
-								mDesc,
-								paramSlots,
-							)
-							if ctx.debugAppearanceSynced && ctx.debugPlayerSpriteCalls < 80 &&
-								cf.GetClassName() == "fa" && clsName == "ak" && mName == "d" && mDesc == "(II)Lff;" && len(paramSlots) == 2 {
-								cnG, _ := ctx.GetStaticField("cn.g").Ref.(*Object)
-								if frame.LocalVars.GetRef(0) == cnG {
-									ctx.debugPlayerSpriteCalls++
-									log.Printf("[DEBUG-PLAYER-SPRITE] caller=fa.%s layer=%d sprite=%d direction=%d frame=%d",
-										callerMethodName, paramSlots[0].Num, paramSlots[1].Num, cnG.GetField("cH").Num, cnG.GetField("cf").Num)
-								}
-							}
 							if opcode != OpInvokestatic {
 								args = append(args, receiver)
 							}
@@ -1621,7 +1738,10 @@ func (ctx *VMContext) ExecuteBytecode(cf *classfile.ClassFile, cfFrame codeWithF
 									return Slot{}, err
 								}
 							}
-							if hasReturnValue(mDesc) {
+							if lo, wide := retSlot.Ref.(wideLo); wide {
+								frame.OperandStack.PushInt(retSlot.Num)
+								frame.OperandStack.PushInt(int32(lo))
+							} else if hasReturnValue(mDesc) {
 								frame.OperandStack.PushInt(retSlot.Num)
 								if retSlot.Ref != nil {
 									frame.OperandStack.slots[frame.OperandStack.size-1].Ref = retSlot.Ref
@@ -2445,12 +2565,28 @@ func (ctx *VMContext) handleNativeCall(clsName, mName, mDesc string, frame *Fram
 			return
 		}
 	} else if clsName == "java/io/DataInputStream" || clsName == "java/io/ByteArrayInputStream" || clsName == "java/io/InputStream" {
+		if mName != "<init>" {
+			n := uint(countMethodParamSlots(mDesc))
+			if frame.OperandStack.size > n {
+				if obj, ok := frame.OperandStack.slots[frame.OperandStack.size-1-n].Ref.(*Object); ok && obj != nil {
+					if _, isNull := obj.Extra.(nullInputStream); isNull {
+						for i := uint(0); i <= n; i++ {
+							frame.OperandStack.PopSlot()
+						}
+						frame.PendingException = ctx.NewException("java/lang/NullPointerException", "")
+						return
+					}
+				}
+			}
+		}
 		if mName == "<init>" {
 			paramCount := countMethodParamSlots(mDesc)
 			var srcBytes []byte
 			var srcTap *midp.SocketTap
+			srcNull := false
 			if paramCount > 0 {
 				arg := frame.OperandStack.PopRef()
+				srcNull = arg == nil
 				if tap := socketTapFromRef(arg); tap != nil {
 					srcTap = tap
 				} else if obj, ok := arg.(*Object); ok && obj != nil {
@@ -2470,6 +2606,8 @@ func (ctx *VMContext) handleNativeCall(clsName, mName, mDesc string, frame *Fram
 				if srcTap != nil {
 					obj.Extra = srcTap
 					log.Printf("[DATA-STREAM-INIT] Wrapped SocketTap")
+				} else if srcNull && clsName == "java/io/DataInputStream" {
+					obj.Extra = nullInputStream{}
 				} else {
 					obj.Extra = &DataStreamReader{Data: srcBytes, Pos: 0}
 				}
@@ -2523,6 +2661,10 @@ func (ctx *VMContext) handleNativeCall(clsName, mName, mDesc string, frame *Fram
 						frame.OperandStack.PushInt(int32(b))
 						return
 					}
+					// Real DataInputStream.readByte throws at end of stream; the
+					// game relies on this to leave optional trailing fields unset.
+					frame.PendingException = ctx.NewException("java/io/EOFException", "EOF in readByte")
+					return
 				}
 			}
 			frame.OperandStack.PushInt(-1)
@@ -2541,6 +2683,8 @@ func (ctx *VMContext) handleNativeCall(clsName, mName, mDesc string, frame *Fram
 						frame.OperandStack.PushInt(int32(b))
 						return
 					}
+					frame.PendingException = ctx.NewException("java/io/EOFException", "EOF in readUnsignedByte")
+					return
 				}
 			}
 			frame.OperandStack.PushInt(-1)
@@ -2579,7 +2723,11 @@ func (ctx *VMContext) handleNativeCall(clsName, mName, mDesc string, frame *Fram
 			}
 			if obj, ok := objRef.(*Object); ok {
 				if reader, ok := obj.Extra.(*DataStreamReader); ok {
-					frame.OperandStack.PushInt(int32(reader.ReadShort()))
+					if reader.Pos+2 <= len(reader.Data) {
+						frame.OperandStack.PushInt(int32(reader.ReadShort()))
+						return
+					}
+					frame.PendingException = ctx.NewException("java/io/EOFException", "EOF in readShort")
 					return
 				}
 			}
@@ -2599,6 +2747,8 @@ func (ctx *VMContext) handleNativeCall(clsName, mName, mDesc string, frame *Fram
 						frame.OperandStack.PushInt(int32(val))
 						return
 					}
+					frame.PendingException = ctx.NewException("java/io/EOFException", "EOF in readUnsignedShort")
+					return
 				}
 			}
 			frame.OperandStack.PushInt(0)
@@ -2611,7 +2761,11 @@ func (ctx *VMContext) handleNativeCall(clsName, mName, mDesc string, frame *Fram
 			}
 			if obj, ok := objRef.(*Object); ok {
 				if reader, ok := obj.Extra.(*DataStreamReader); ok {
-					frame.OperandStack.PushInt(reader.ReadInt())
+					if reader.Pos+4 <= len(reader.Data) {
+						frame.OperandStack.PushInt(reader.ReadInt())
+						return
+					}
+					frame.PendingException = ctx.NewException("java/io/EOFException", "EOF in readInt")
 					return
 				}
 			}
@@ -2633,9 +2787,13 @@ func (ctx *VMContext) handleNativeCall(clsName, mName, mDesc string, frame *Fram
 			}
 			if obj, ok := objRef.(*Object); ok {
 				if reader, ok := obj.Extra.(*DataStreamReader); ok {
-					value := uint64(reader.ReadLong())
-					frame.OperandStack.PushInt(int32(value >> 32))
-					frame.OperandStack.PushInt(int32(value))
+					if reader.Pos+8 <= len(reader.Data) {
+						value := uint64(reader.ReadLong())
+						frame.OperandStack.PushInt(int32(value >> 32))
+						frame.OperandStack.PushInt(int32(value))
+						return
+					}
+					frame.PendingException = ctx.NewException("java/io/EOFException", "EOF in readLong")
 					return
 				}
 			}
@@ -2767,7 +2925,7 @@ func (ctx *VMContext) handleNativeCall(clsName, mName, mDesc string, frame *Fram
 				name = extractString(obj)
 			}
 			store, exists := ctx.RecordStores[name]
-			if !exists {
+			if !exists && !isDynamicIconStore(name) {
 				if base := getBaselineRMSStores()[name]; base != nil {
 					store = cloneRecordStoreData(base)
 					ctx.RecordStores[name] = store
@@ -2802,6 +2960,7 @@ func (ctx *VMContext) handleNativeCall(clsName, mName, mDesc string, frame *Fram
 					store.Records = append(store.Records, b)
 					recID = int32(len(store.Records))
 					log.Printf("[RMS] addRecord #%d (%d bytes)", recID, len(b))
+					ctx.saveRMS()
 				}
 			}
 			frame.OperandStack.PushInt(recID)
@@ -2880,6 +3039,7 @@ func (ctx *VMContext) handleNativeCall(clsName, mName, mDesc string, frame *Fram
 							copy(b, srcBytes[offset:offset+numBytes])
 							store.Records[idx] = b
 							log.Printf("[RMS] setRecord #%d (%d bytes)", recID, len(b))
+							ctx.saveRMS()
 						}
 					}
 				}
@@ -3569,6 +3729,17 @@ func (ctx *VMContext) handleNativeCall(clsName, mName, mDesc string, frame *Fram
 					} else {
 						log.Printf("[IMAGE-NOT-FOUND] Resource %s not found in JAR", resName)
 					}
+					// resLocal icons live on the server, not in the JAR. Serve the
+					// one captured from its -51 reply, if we have it.
+					if id, ok := resLocalIconID(resName); ok {
+						if png := ctx.loadDownloadedIcon(id); png != nil {
+							if img, err := midp.DecodeImage(png); err == nil && img != nil {
+								log.Printf("[IMAGE-RESLOCAL] Served %s from downloaded icon %d (%dx%d)", resName, id, img.Bounds().Dx(), img.Bounds().Dy())
+								frame.OperandStack.PushRef(&Object{Extra: img})
+								return
+							}
+						}
+					}
 				}
 				frame.PendingException = ctx.NewException("java/io/IOException", "Resource not found: "+resName)
 				return
@@ -3677,6 +3848,17 @@ func (ctx *VMContext) handleNativeCall(clsName, mName, mDesc string, frame *Fram
 			}
 			return
 		}
+	} else if clsName == "java/lang/Long" && mName == "parseLong" && mDesc == "(Ljava/lang/String;)J" {
+		// Bag equipment rows (er.a(ep,et,B)) pass Long.parseLong(expiry) into new j(...).
+		s := extractString(frame.OperandStack.PopRef())
+		v, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			frame.PendingException = ctx.NewException("java/lang/NumberFormatException", s)
+			return
+		}
+		frame.OperandStack.PushInt(int32(v >> 32))
+		frame.OperandStack.PushInt(int32(v))
+		return
 	} else if clsName == "java/lang/System" {
 		if mName == "currentTimeMillis" {
 			now := time.Now().UnixMilli()
@@ -3752,6 +3934,9 @@ func (ctx *VMContext) handleNativeCall(clsName, mName, mDesc string, frame *Fram
 	}
 	if hasReturnValue(mDesc) {
 		frame.OperandStack.PushInt(0)
+		if r := mDesc[strings.Index(mDesc, ")")+1]; r == 'J' || r == 'D' {
+			frame.OperandStack.PushInt(0) // long/double take two slots
+		}
 	}
 }
 

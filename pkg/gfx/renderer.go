@@ -1,10 +1,5 @@
 package gfx
 
-/*
-#cgo LDFLAGS: -L${SRCDIR}/../../lib
-*/
-import "C"
-
 import (
 	"image"
 	"image/png"

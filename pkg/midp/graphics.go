@@ -276,7 +276,6 @@ func (g *Graphics) DrawRegion(img image.Image, xSrc, ySrc, w, h, transform, xDes
 		return
 	}
 
-
 	transImg := image.NewRGBA(image.Rect(0, 0, outW, outH))
 	srcBounds := img.Bounds()
 
@@ -359,7 +358,6 @@ func (g *Graphics) DrawString(str string, x, y, anchor int) {
 	if a == 0 {
 		textColor = color.RGBA{R: 255, G: 255, B: 255, A: 255}
 	}
-
 
 	for i, ch := range runes {
 		glyph := getGlyph8x13(ch)

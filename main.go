@@ -268,13 +268,14 @@ func (g *Game) Layout(outsideWidth, outsideHeight int) (screenWidth, screenHeigh
 func main() {
 	runtime.LockOSThread()
 
-	// Parse arguments
-	defaultJar := "/home/neuro/Downloads/x2.jar"
+	// Parse arguments (prefer KnightOnline_v403.jar as default original game)
+	defaultJar := "/home/neuro/Downloads/KnightOnline_v403.jar"
 	if _, err := os.Stat(defaultJar); os.IsNotExist(err) {
-		defaultJar = "/home/neuro/Downloads/KnightOnline_402.jar"
+		defaultJar = "/home/neuro/Downloads/x2.jar"
 	}
 	for _, arg := range os.Args[1:] {
-		if !strings.HasPrefix(arg, "-") {
+		arg = strings.TrimSpace(arg)
+		if arg != "" && !strings.HasPrefix(arg, "-") {
 			defaultJar = arg
 		}
 	}
