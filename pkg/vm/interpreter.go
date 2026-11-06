@@ -411,6 +411,27 @@ func pushLong(frame *Frame, v int64) {
 	frame.OperandStack.PushInt(int32(v))
 }
 
+func popFloat(frame *Frame) float32 {
+	return math.Float32frombits(uint32(frame.OperandStack.PopInt()))
+}
+
+func pushFloat(frame *Frame, v float32) {
+	frame.OperandStack.PushInt(int32(math.Float32bits(v)))
+}
+
+// f2i follows JVM rules: NaN -> 0, out-of-range values saturate.
+func f2i(v float32) int32 {
+	switch {
+	case v != v:
+		return 0
+	case v >= math.MaxInt32:
+		return math.MaxInt32
+	case v <= math.MinInt32:
+		return math.MinInt32
+	}
+	return int32(v)
+}
+
 
 func (r *DataStreamReader) Available() int32 {
 	rem := len(r.Data) - r.Pos
@@ -794,17 +815,17 @@ func (ctx *VMContext) ExecuteBytecode(cf *classfile.ClassFile, cfFrame codeWithF
 			idx := binary.BigEndian.Uint16(code[frame.PC : frame.PC+2])
 			frame.PC += 2
 			ctx.pushConstant(cf, frame, idx)
-		case OpIload:
+		case OpIload, OpFload: // floats live in one slot as IEEE bits, same shape as int
 			idx := code[frame.PC]
 			frame.PC++
 			frame.OperandStack.PushInt(frame.LocalVars.GetInt(uint(idx)))
-		case OpIload0:
+		case OpIload0, OpFload0:
 			frame.OperandStack.PushInt(frame.LocalVars.GetInt(0))
-		case OpIload1:
+		case OpIload1, OpFload1:
 			frame.OperandStack.PushInt(frame.LocalVars.GetInt(1))
-		case OpIload2:
+		case OpIload2, OpFload2:
 			frame.OperandStack.PushInt(frame.LocalVars.GetInt(2))
-		case OpIload3:
+		case OpIload3, OpFload3:
 			frame.OperandStack.PushInt(frame.LocalVars.GetInt(3))
 		case OpAload:
 			idx := code[frame.PC]
@@ -921,17 +942,17 @@ func (ctx *VMContext) ExecuteBytecode(cf *classfile.ClassFile, cfFrame codeWithF
 			} else {
 				frame.OperandStack.PushRef(nil)
 			}
-		case OpIstore:
+		case OpIstore, OpFstore:
 			idx := code[frame.PC]
 			frame.PC++
 			frame.LocalVars.SetInt(uint(idx), frame.OperandStack.PopInt())
-		case OpIstore0:
+		case OpIstore0, OpFstore0:
 			frame.LocalVars.SetInt(0, frame.OperandStack.PopInt())
-		case OpIstore1:
+		case OpIstore1, OpFstore1:
 			frame.LocalVars.SetInt(1, frame.OperandStack.PopInt())
-		case OpIstore2:
+		case OpIstore2, OpFstore2:
 			frame.LocalVars.SetInt(2, frame.OperandStack.PopInt())
-		case OpIstore3:
+		case OpIstore3, OpFstore3:
 			frame.LocalVars.SetInt(3, frame.OperandStack.PopInt())
 		case OpAstore:
 			idx := code[frame.PC]
@@ -1128,11 +1149,11 @@ func (ctx *VMContext) ExecuteBytecode(cf *classfile.ClassFile, cfFrame codeWithF
 			} else {
 				frame.OperandStack.PushInt(0)
 			}
-		case OpSwap:
-			v1 := frame.OperandStack.PopInt()
-			v2 := frame.OperandStack.PopInt()
-			frame.OperandStack.PushInt(v1)
-			frame.OperandStack.PushInt(v2)
+		case OpSwap: // whole slots: swapping only Num dropped object refs
+			v1 := frame.OperandStack.PopSlot()
+			v2 := frame.OperandStack.PopSlot()
+			frame.OperandStack.PushSlot(v1)
+			frame.OperandStack.PushSlot(v2)
 		case OpIadd:
 			v2 := frame.OperandStack.PopInt()
 			v1 := frame.OperandStack.PopInt()
@@ -1196,6 +1217,32 @@ func (ctx *VMContext) ExecuteBytecode(cf *classfile.ClassFile, cfFrame codeWithF
 			constVal := int32(int8(code[frame.PC+1]))
 			frame.PC += 2
 			frame.LocalVars.SetInt(idx, frame.LocalVars.GetInt(idx)+constVal)
+		case OpWide: // 16-bit local index (and iinc constant)
+			op := code[frame.PC]
+			idx := uint(binary.BigEndian.Uint16(code[frame.PC+1:]))
+			frame.PC += 3
+			switch op {
+			case OpIinc:
+				constVal := int32(int16(binary.BigEndian.Uint16(code[frame.PC:])))
+				frame.PC += 2
+				frame.LocalVars.SetInt(idx, frame.LocalVars.GetInt(idx)+constVal)
+			case OpIload, OpFload:
+				frame.OperandStack.PushInt(frame.LocalVars.GetInt(idx))
+			case OpIstore, OpFstore:
+				frame.LocalVars.SetInt(idx, frame.OperandStack.PopInt())
+			case OpAload:
+				frame.OperandStack.PushRef(frame.LocalVars.GetRef(idx))
+			case OpAstore:
+				frame.LocalVars.SetRef(idx, frame.OperandStack.PopRef())
+			case OpLload, OpDload:
+				frame.LocalVars.EnsureSize(idx + 1)
+				frame.OperandStack.PushSlot(frame.LocalVars[idx])
+				frame.OperandStack.PushSlot(frame.LocalVars[idx+1])
+			case OpLstore, OpDstore:
+				frame.LocalVars.EnsureSize(idx + 1)
+				frame.LocalVars[idx+1] = frame.OperandStack.PopSlot()
+				frame.LocalVars[idx] = frame.OperandStack.PopSlot()
+			}
 		case OpGoto:
 			offset := int16(binary.BigEndian.Uint16(code[frame.PC : frame.PC+2]))
 			frame.PC += int(offset) - 1
@@ -1390,8 +1437,44 @@ func (ctx *VMContext) ExecuteBytecode(cf *classfile.ClassFile, cfFrame codeWithF
 		case OpLreturn:
 			lo := frame.OperandStack.PopInt()
 			return Slot{Num: frame.OperandStack.PopInt(), Ref: wideLo(lo)}, nil
-		case OpI2f, OpI2d, OpF2i, OpD2i:
-			// Type conversion stubs
+		case OpFconst0, OpFconst1, OpFconst2:
+			pushFloat(frame, float32(opcode-OpFconst0))
+		case OpFadd, OpFsub, OpFmul, OpFdiv, OpFrem:
+			v2, v1 := popFloat(frame), popFloat(frame)
+			switch opcode {
+			case OpFadd:
+				pushFloat(frame, v1+v2)
+			case OpFsub:
+				pushFloat(frame, v1-v2)
+			case OpFmul:
+				pushFloat(frame, v1*v2)
+			case OpFdiv:
+				pushFloat(frame, v1/v2)
+			default:
+				pushFloat(frame, float32(math.Mod(float64(v1), float64(v2))))
+			}
+		case OpFneg:
+			pushFloat(frame, -popFloat(frame))
+		case OpFcmpl, OpFcmpg:
+			v2, v1 := popFloat(frame), popFloat(frame)
+			switch {
+			case v1 > v2:
+				frame.OperandStack.PushInt(1)
+			case v1 < v2:
+				frame.OperandStack.PushInt(-1)
+			case v1 == v2:
+				frame.OperandStack.PushInt(0)
+			case opcode == OpFcmpg: // NaN
+				frame.OperandStack.PushInt(1)
+			default:
+				frame.OperandStack.PushInt(-1)
+			}
+		case OpI2f:
+			pushFloat(frame, float32(frame.OperandStack.PopInt()))
+		case OpF2i:
+			frame.OperandStack.PushInt(f2i(popFloat(frame)))
+		case OpI2d, OpD2i:
+			// Type conversion stubs (no double support; unused by the game)
 		case OpLookupswitch:
 			startPC := frame.PC - 1
 			pad := (4 - ((startPC + 1) % 4)) % 4
@@ -1446,7 +1529,7 @@ func (ctx *VMContext) ExecuteBytecode(cf *classfile.ClassFile, cfFrame codeWithF
 				ctx.SyncPlayerAppearance()
 			}
 			return Slot{}, nil
-		case OpIreturn:
+		case OpIreturn, OpFreturn:
 			return Slot{Num: frame.OperandStack.PopInt()}, nil
 		case OpAreturn:
 			return Slot{Ref: frame.OperandStack.PopRef()}, nil
@@ -1818,6 +1901,8 @@ func (ctx *VMContext) pushConstant(cf *classfile.ClassFile, frame *Frame, idx ui
 	switch c := cpItem.(type) {
 	case classfile.ConstantIntegerInfo:
 		frame.OperandStack.PushInt(c.Value)
+	case classfile.ConstantFloatInfo:
+		pushFloat(frame, c.Value)
 	case classfile.ConstantLongInfo:
 		frame.OperandStack.PushInt(int32(c.Value >> 32))
 		frame.OperandStack.PushInt(int32(c.Value))
@@ -3848,6 +3933,15 @@ func (ctx *VMContext) handleNativeCall(clsName, mName, mDesc string, frame *Fram
 			}
 			return
 		}
+	} else if clsName == "java/lang/Math" && mName == "abs" && (mDesc == "(I)I" || mDesc == "(F)F") {
+		v := frame.OperandStack.PopInt()
+		if mDesc == "(F)F" {
+			v &^= -1 << 31 // clear the IEEE sign bit
+		} else if v < 0 {
+			v = -v
+		}
+		frame.OperandStack.PushInt(v)
+		return
 	} else if clsName == "java/lang/Long" && mName == "parseLong" && mDesc == "(Ljava/lang/String;)J" {
 		// Bag equipment rows (er.a(ep,et,B)) pass Long.parseLong(expiry) into new j(...).
 		s := extractString(frame.OperandStack.PopRef())
